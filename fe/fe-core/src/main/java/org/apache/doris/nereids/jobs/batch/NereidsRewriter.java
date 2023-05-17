@@ -67,13 +67,13 @@ import org.apache.doris.nereids.rules.rewrite.logical.PushFilterInsideJoin;
 import org.apache.doris.nereids.rules.rewrite.logical.PushdownFilterThroughProject;
 import org.apache.doris.nereids.rules.rewrite.logical.PushdownLimit;
 import org.apache.doris.nereids.rules.rewrite.logical.ReorderJoin;
-import org.apache.doris.nereids.rules.rewrite.logical.SemiJoinAggTranspose;
-import org.apache.doris.nereids.rules.rewrite.logical.SemiJoinAggTransposeProject;
 import org.apache.doris.nereids.rules.rewrite.logical.SemiJoinCommute;
-import org.apache.doris.nereids.rules.rewrite.logical.SemiJoinLogicalJoinTranspose;
-import org.apache.doris.nereids.rules.rewrite.logical.SemiJoinLogicalJoinTransposeProject;
 import org.apache.doris.nereids.rules.rewrite.logical.SimplifyAggGroupBy;
 import org.apache.doris.nereids.rules.rewrite.logical.SplitLimit;
+import org.apache.doris.nereids.rules.rewrite.logical.TransposeSemiJoinAgg;
+import org.apache.doris.nereids.rules.rewrite.logical.TransposeSemiJoinAggProject;
+import org.apache.doris.nereids.rules.rewrite.logical.TransposeSemiJoinLogicalJoin;
+import org.apache.doris.nereids.rules.rewrite.logical.TransposeSemiJoinLogicalJoinProject;
 
 import com.google.common.collect.ImmutableList;
 
@@ -84,27 +84,27 @@ import java.util.List;
  */
 public class NereidsRewriter extends BatchRewriteJob {
     private static final List<RewriteJob> REWRITE_JOBS = jobs(
-            topic("Normalization",
+            topic("Plan Normalization",
                 topDown(
                     new EliminateOrderByConstant(),
                     new EliminateGroupByConstant(),
-
                     // MergeProjects depends on this rule
                     new LogicalSubQueryAliasToLogicalProject(),
-
-                    // rewrite expressions, no depends
+                    // TODO: we should do expression normalization after plan normalization
+                    //   because some rewritten depends on sub expression tree matching
+                    //   such as group by key matching and replaced
+                    //   but we need to do some normalization before subquery unnesting,
+                    //   such as extract common expression.
                     new ExpressionNormalization(),
                     new ExpressionOptimization(),
                     new AvgDistinctToSumDivCount(),
                     new CountDistinctRewrite(),
-
                     new ExtractFilterFromCrossJoin()
                 ),
-
-                // ExtractSingleTableExpressionFromDisjunction conflict to InPredicateToEqualToRule
-                // in the ExpressionNormalization, so must invoke in another job, or else run into
-                // dead loop
                 topDown(
+                    // ExtractSingleTableExpressionFromDisjunction conflict to InPredicateToEqualToRule
+                    // in the ExpressionNormalization, so must invoke in another job, or else run into
+                    // dead loop
                     new ExtractSingleTableExpressionFromDisjunction()
                 )
             ),
@@ -131,14 +131,14 @@ public class NereidsRewriter extends BatchRewriteJob {
                 )
             ),
 
+            // we should eliminate hint again because some hint maybe exist in the CTE or subquery.
+            // so this rule should invoke after "Subquery unnesting"
+            custom(RuleType.ELIMINATE_HINT, EliminateLogicalSelectHint::new),
+
             // please note: this rule must run before NormalizeAggregate
             topDown(
                 new AdjustAggregateNullableForEmptySet()
             ),
-
-            // we should eliminate hint again because some hint maybe exist in the CTE or subquery.
-            // so this rule should invoke after "Subquery unnesting"
-            custom(RuleType.ELIMINATE_HINT, EliminateLogicalSelectHint::new),
 
             // The rule modification needs to be done after the subquery is unnested,
             // because for scalarSubQuery, the connection condition is stored in apply in the analyzer phase,
@@ -183,10 +183,10 @@ public class NereidsRewriter extends BatchRewriteJob {
                 // pushdown SEMI Join
                 bottomUp(
                     new SemiJoinCommute(),
-                    new SemiJoinLogicalJoinTranspose(),
-                    new SemiJoinLogicalJoinTransposeProject(),
-                    new SemiJoinAggTranspose(),
-                    new SemiJoinAggTransposeProject()
+                    new TransposeSemiJoinLogicalJoin(),
+                    new TransposeSemiJoinLogicalJoinProject(),
+                    new TransposeSemiJoinAgg(),
+                    new TransposeSemiJoinAggProject()
                 ),
 
                 topDown(

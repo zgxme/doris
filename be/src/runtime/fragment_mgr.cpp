@@ -56,7 +56,6 @@
 #include "io/fs/stream_load_pipe.h"
 #include "opentelemetry/trace/scope.h"
 #include "pipeline/pipeline_fragment_context.h"
-#include "pipeline/task_scheduler.h"
 #include "runtime/client_cache.h"
 #include "runtime/descriptors.h"
 #include "runtime/exec_env.h"
@@ -388,6 +387,7 @@ void FragmentMgr::coordinator_callback(const ReportStatusRequest& req) {
     exec_status.set_t_status(&params);
     params.__set_done(req.done);
     params.__set_query_type(req.runtime_state->query_type());
+    params.__set_finished_scan_ranges(req.runtime_state->num_finished_range());
 
     DCHECK(req.runtime_state != nullptr);
     if (req.runtime_state->query_type() == TQueryType::LOAD && !req.done && req.status.ok()) {
@@ -690,6 +690,25 @@ Status FragmentMgr::_get_query_ctx(const Params& params, TUniqueId query_id, boo
             query_ctx->query_mem_tracker->enable_print_log_usage();
         }
 
+        if constexpr (std::is_same_v<TPipelineFragmentParams, Params>) {
+            if (params.__isset.resource_groups && !params.resource_groups.empty()) {
+                taskgroup::TaskGroupInfo task_group_info;
+                auto status = taskgroup::TaskGroupInfo::parse_group_info(params.resource_groups[0],
+                                                                         &task_group_info);
+                if (status.ok()) {
+                    auto tg = taskgroup::TaskGroupManager::instance()->get_or_create_task_group(
+                            task_group_info);
+                    tg->add_mem_tracker_limiter(query_ctx->query_mem_tracker);
+                    query_ctx->set_task_group(tg);
+                    LOG(INFO) << "Query/load id: " << print_id(query_ctx->query_id)
+                              << " use task group: " << tg->debug_string();
+                }
+            } else {
+                VLOG_DEBUG << "Query/load id: " << print_id(query_ctx->query_id)
+                           << " does not use task group.";
+            }
+        }
+
         {
             // Find _query_ctx_map again, in case some other request has already
             // create the query fragments context.
@@ -802,23 +821,6 @@ Status FragmentMgr::exec_plan_fragment(const TPipelineFragmentParams& params,
     std::shared_ptr<QueryContext> query_ctx;
     RETURN_IF_ERROR(_get_query_ctx(params, params.query_id, true, query_ctx));
 
-    if (params.__isset.resource_groups && !params.resource_groups.empty()) {
-        taskgroup::TaskGroupInfo task_group_info;
-        auto status = taskgroup::TaskGroupInfo::parse_group_info(params.resource_groups[0],
-                                                                 &task_group_info);
-        if (status.ok()) {
-            auto tg = taskgroup::TaskGroupManager::instance()->get_or_create_task_group(
-                    task_group_info);
-            _exec_env->pipeline_task_group_scheduler()->try_update_task_group(task_group_info, tg);
-            query_ctx->set_task_group(tg);
-            LOG(INFO) << "Query/load id: " << print_id(query_ctx->query_id)
-                      << " use task group: " << tg->debug_string();
-        }
-    } else {
-        VLOG_DEBUG << "Query/load id: " << print_id(query_ctx->query_id)
-                   << " does not use task group.";
-    }
-
     for (size_t i = 0; i < params.local_params.size(); i++) {
         const auto& local_params = params.local_params[i];
 
@@ -907,7 +909,6 @@ void FragmentMgr::cancel(const TUniqueId& fragment_id, const PPlanFragmentCancel
     }
     if (exec_state) {
         exec_state->cancel(reason, msg);
-        return;
     }
 
     std::shared_ptr<pipeline::PipelineFragmentContext> pipeline_fragment_ctx;

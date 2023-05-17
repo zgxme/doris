@@ -102,36 +102,6 @@
 
 namespace doris::vectorized {
 
-//TODO: these three functions could be merged.
-inline size_t get_char_len(const std::string_view& str, std::vector<size_t>* str_index) {
-    size_t char_len = 0;
-    for (size_t i = 0, char_size = 0; i < str.length(); i += char_size) {
-        char_size = UTF8_BYTE_LENGTH[(unsigned char)str[i]];
-        str_index->push_back(i);
-        ++char_len;
-    }
-    return char_len;
-}
-
-inline size_t get_char_len(const StringRef& str, std::vector<size_t>* str_index) {
-    size_t char_len = 0;
-    for (size_t i = 0, char_size = 0; i < str.size; i += char_size) {
-        char_size = UTF8_BYTE_LENGTH[(unsigned char)(str.data)[i]];
-        str_index->push_back(i);
-        ++char_len;
-    }
-    return char_len;
-}
-
-inline size_t get_char_len(const StringRef& str, size_t end_pos) {
-    size_t char_len = 0;
-    for (size_t i = 0, char_size = 0; i < std::min(str.size, end_pos); i += char_size) {
-        char_size = UTF8_BYTE_LENGTH[(unsigned char)(str.data)[i]];
-        ++char_len;
-    }
-    return char_len;
-}
-
 struct StringOP {
     static void push_empty_string(int index, ColumnString::Chars& chars,
                                   ColumnString::Offsets& offsets) {
@@ -200,7 +170,7 @@ private:
                         const PaddedPODArray<Int32>& start, const PaddedPODArray<Int32>& len,
                         NullMap& null_map, ColumnString::Chars& res_chars,
                         ColumnString::Offsets& res_offsets) {
-        int size = offsets.size();
+        size_t size = offsets.size();
         res_offsets.resize(size);
         res_chars.reserve(chars.size());
 
@@ -208,63 +178,118 @@ private:
         PMR::monotonic_buffer_resource pool {buf.data(), buf.size()};
         PMR::vector<size_t> index {&pool};
 
-        PMR::vector<std::pair<const unsigned char*, int>> strs(&pool);
-        strs.resize(size);
         auto* __restrict data_ptr = chars.data();
         auto* __restrict offset_ptr = offsets.data();
-        for (int i = 0; i < size; ++i) {
-            strs[i].first = data_ptr + offset_ptr[i - 1];
-            strs[i].second = offset_ptr[i] - offset_ptr[i - 1];
-        }
 
-        for (int i = 0; i < size; ++i) {
-            auto [raw_str, str_size] = strs[i];
-            const auto& start_value = start[index_check_const(i, Const)];
-            const auto& len_value = len[index_check_const(i, Const)];
+        if constexpr (Const) {
+            const auto start_value = start[0];
+            const auto len_value = len[0];
+            if (start_value == 0 || len_value <= 0) {
+                for (size_t i = 0; i < size; ++i) {
+                    StringOP::push_empty_string(i, res_chars, res_offsets);
+                }
+            } else {
+                for (size_t i = 0; i < size; ++i) {
+                    const int str_size = offset_ptr[i] - offset_ptr[i - 1];
+                    const uint8_t* raw_str = data_ptr + offset_ptr[i - 1];
+                    // return empty string if start > src.length
+                    if (start_value > str_size || start_value < -str_size || str_size == 0) {
+                        StringOP::push_empty_string(i, res_chars, res_offsets);
+                        continue;
+                    }
+                    // reference to string_function.cpp: substring
+                    size_t byte_pos = 0;
+                    index.clear();
+                    for (size_t j = 0, char_size = 0;
+                         j < str_size &&
+                         (start_value <= 0 || index.size() <= start_value + len_value);
+                         j += char_size) {
+                        char_size = UTF8_BYTE_LENGTH[(unsigned char)(raw_str)[j]];
+                        index.push_back(j);
+                    }
 
-            // return empty string if start > src.length
-            if (start_value > str_size || str_size == 0 || start_value == 0 || len_value <= 0) {
-                StringOP::push_empty_string(i, res_chars, res_offsets);
-                continue;
-            }
-            // reference to string_function.cpp: substring
-            size_t byte_pos = 0;
-            index.clear();
-            for (size_t j = 0, char_size = 0; j < str_size; j += char_size) {
-                char_size = UTF8_BYTE_LENGTH[(unsigned char)(raw_str)[j]];
-                index.push_back(j);
-                if (start_value > 0 && index.size() > start_value + len_value) {
-                    break;
+                    int fixed_pos = start_value;
+                    if (fixed_pos < 0) {
+                        fixed_pos = str_size + fixed_pos + 1;
+                    } else if (fixed_pos > index.size()) {
+                        StringOP::push_null_string(i, res_chars, res_offsets, null_map);
+                        continue;
+                    }
+
+                    byte_pos = index[fixed_pos - 1];
+                    int fixed_len = str_size - byte_pos;
+                    if (fixed_pos + len_value <= index.size()) {
+                        fixed_len = index[fixed_pos + len_value - 1] - byte_pos;
+                    }
+
+                    if (byte_pos <= str_size && fixed_len > 0) {
+                        // return StringRef(str.data + byte_pos, fixed_len);
+                        StringOP::push_value_string(
+                                std::string_view {reinterpret_cast<const char*>(raw_str + byte_pos),
+                                                  (size_t)fixed_len},
+                                i, res_chars, res_offsets);
+                    } else {
+                        StringOP::push_empty_string(i, res_chars, res_offsets);
+                    }
                 }
             }
-
-            int fixed_pos = start_value;
-            if (fixed_pos < -(int)index.size()) {
-                StringOP::push_empty_string(i, res_chars, res_offsets);
-                continue;
-            }
-            if (fixed_pos < 0) {
-                fixed_pos = index.size() + fixed_pos + 1;
-            }
-            if (fixed_pos > index.size()) {
-                StringOP::push_null_string(i, res_chars, res_offsets, null_map);
-                continue;
+        } else {
+            PMR::vector<std::pair<const unsigned char*, int>> strs(&pool);
+            strs.resize(size);
+            for (int i = 0; i < size; ++i) {
+                strs[i].first = data_ptr + offset_ptr[i - 1];
+                strs[i].second = offset_ptr[i] - offset_ptr[i - 1];
             }
 
-            byte_pos = index[fixed_pos - 1];
-            int fixed_len = str_size - byte_pos;
-            if (fixed_pos + len_value <= index.size()) {
-                fixed_len = index[fixed_pos + len_value - 1] - byte_pos;
-            }
+            for (size_t i = 0; i < size; ++i) {
+                auto [raw_str, str_size] = strs[i];
+                const auto& start_value = start[i];
+                const auto& len_value = len[i];
 
-            if (byte_pos <= str_size && fixed_len > 0) {
-                // return StringRef(str.data + byte_pos, fixed_len);
-                StringOP::push_value_string(
-                        std::string_view {reinterpret_cast<const char*>(raw_str + byte_pos),
-                                          (size_t)fixed_len},
-                        i, res_chars, res_offsets);
-            } else {
-                StringOP::push_empty_string(i, res_chars, res_offsets);
+                // return empty string if start > src.length
+                if (start_value > str_size || str_size == 0 || start_value == 0 || len_value <= 0) {
+                    StringOP::push_empty_string(i, res_chars, res_offsets);
+                    continue;
+                }
+                // reference to string_function.cpp: substring
+                size_t byte_pos = 0;
+                index.clear();
+                for (size_t j = 0, char_size = 0; j < str_size; j += char_size) {
+                    char_size = UTF8_BYTE_LENGTH[(unsigned char)(raw_str)[j]];
+                    index.push_back(j);
+                    if (start_value > 0 && index.size() > start_value + len_value) {
+                        break;
+                    }
+                }
+
+                int fixed_pos = start_value;
+                if (fixed_pos < -(int)index.size()) {
+                    StringOP::push_empty_string(i, res_chars, res_offsets);
+                    continue;
+                }
+                if (fixed_pos < 0) {
+                    fixed_pos = index.size() + fixed_pos + 1;
+                }
+                if (fixed_pos > index.size()) {
+                    StringOP::push_null_string(i, res_chars, res_offsets, null_map);
+                    continue;
+                }
+
+                byte_pos = index[fixed_pos - 1];
+                int fixed_len = str_size - byte_pos;
+                if (fixed_pos + len_value <= index.size()) {
+                    fixed_len = index[fixed_pos + len_value - 1] - byte_pos;
+                }
+
+                if (byte_pos <= str_size && fixed_len > 0) {
+                    // return StringRef(str.data + byte_pos, fixed_len);
+                    StringOP::push_value_string(
+                            std::string_view {reinterpret_cast<const char*>(raw_str + byte_pos),
+                                              (size_t)fixed_len},
+                            i, res_chars, res_offsets);
+                } else {
+                    StringOP::push_empty_string(i, res_chars, res_offsets);
+                }
             }
         }
     }
@@ -1283,9 +1308,9 @@ public:
                         reinterpret_cast<const char*>(&padcol_chars[padcol_offsets[i - 1]]);
 
                 size_t str_char_size =
-                        get_char_len(std::string_view(str_data, str_len), &str_index);
+                        simd::VStringFunctions::get_char_len(str_data, str_len, str_index);
                 size_t pad_char_size =
-                        get_char_len(std::string_view(pad_data, pad_len), &pad_index);
+                        simd::VStringFunctions::get_char_len(pad_data, pad_len, pad_index);
 
                 if (col_len_data[i] <= str_char_size) {
                     // truncate the input string
@@ -2430,7 +2455,7 @@ private:
         // but throws an exception for *start_pos > str->len.
         // Since returning 0 seems to be Hive's error condition, return 0.
         std::vector<size_t> index;
-        size_t char_len = get_char_len(str, &index);
+        size_t char_len = simd::VStringFunctions::get_char_len(str.data, str.size, index);
         if (start_pos <= 0 || start_pos > str.size || start_pos > char_len) {
             return 0;
         }
@@ -2442,7 +2467,8 @@ private:
         int32_t match_pos = search_ptr->search(&adjusted_str);
         if (match_pos >= 0) {
             // Hive returns the position in the original string starting from 1.
-            return start_pos + get_char_len(adjusted_str, match_pos);
+            size_t len = std::min(adjusted_str.size, (size_t)match_pos);
+            return start_pos + simd::VStringFunctions::get_char_len(adjusted_str.data, len);
         } else {
             return 0;
         }

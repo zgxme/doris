@@ -631,7 +631,7 @@ visible_functions = [
     [['array_popfront'], 'ARRAY_DECIMAL128', ['ARRAY_DECIMAL128'], ''],
     [['array_popfront'], 'ARRAY_VARCHAR', ['ARRAY_VARCHAR'], ''],
     [['array_popfront'], 'ARRAY_STRING', ['ARRAY_STRING'], ''],
-    [['array_map'], 'ARRAY',   ['LAMBDA_FUNCTION', 'ARRAY', '...'], ''],
+    [['array_map'], 'ARRAY', ['LAMBDA_FUNCTION', 'ARRAY<K>', '...'], '', ['K']],
     [['array_filter'], 'ARRAY_BOOLEAN',['ARRAY_BOOLEAN', 'ARRAY_BOOLEAN'], ''],
     [['array_filter'], 'ARRAY_TINYINT',['ARRAY_TINYINT', 'ARRAY_BOOLEAN'], ''],
     [['array_filter'], 'ARRAY_SMALLINT',['ARRAY_SMALLINT', 'ARRAY_BOOLEAN'], ''],
@@ -689,6 +689,7 @@ visible_functions = [
     [['array_exists'], 'ARRAY_BOOLEAN', ['ARRAY_STRING'], ''],
 
     [['array_first_index'], 'BIGINT', ['ARRAY_BOOLEAN'], 'ALWAYS_NOT_NULLABLE'],
+    [['array_count'], 'BIGINT', ['ARRAY_BOOLEAN'], 'ALWAYS_NOT_NULLABLE'],
 
     [['array_shuffle', 'shuffle'], 'ARRAY_BOOLEAN',   ['ARRAY_BOOLEAN'], ''],
     [['array_shuffle', 'shuffle'], 'ARRAY_TINYINT',   ['ARRAY_TINYINT'], ''],
@@ -790,6 +791,7 @@ visible_functions = [
     [['array_range'], 'ARRAY_INT', ['INT', 'INT', 'INT'], 'ALWAYS_NULLABLE'],
     
     [['array_zip'], 'ARRAY', ['ARRAY', '...'], ''],
+
 
     # reverse function for string builtin
     [['reverse'], 'VARCHAR', ['VARCHAR'], ''],
@@ -1456,7 +1458,8 @@ visible_functions = [
     [['esquery'], 'BOOLEAN', ['MAP', 'VARCHAR'], ''],
     [['esquery'], 'BOOLEAN', ['STRING', 'VARCHAR'], ''],
     [['esquery'], 'BOOLEAN', ['VARIANT', 'VARCHAR'], ''],
-
+    # used for accept graph sql
+    [['g'], 'BOOLEAN', ['VARCHAR'], ''],
     # String builtin functions
     [['substr', 'substring'], 'VARCHAR', ['VARCHAR', 'INT'], 'ALWAYS_NULLABLE'],
     [['substr', 'substring'], 'VARCHAR', ['VARCHAR', 'INT', 'INT'], 'ALWAYS_NULLABLE'],

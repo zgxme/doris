@@ -61,7 +61,8 @@ public class JdbcClient {
 
     private boolean isLowerCaseTableNames = false;
 
-    private Map<String, Boolean> specifiedDatabaseMap = Maps.newHashMap();
+    private Map<String, Boolean> includeDatabaseMap = Maps.newHashMap();
+    private Map<String, Boolean> excludeDatabaseMap = Maps.newHashMap();
 
     // only used when isLowerCaseTableNames = true.
     private Map<String, String> lowerTableToRealTable = Maps.newHashMap();
@@ -69,13 +70,16 @@ public class JdbcClient {
     private String oceanbaseMode = "";
 
     public JdbcClient(String user, String password, String jdbcUrl, String driverUrl, String driverClass,
-            String onlySpecifiedDatabase, String isLowerCaseTableNames, Map specifiedDatabaseMap,
-            String oceanbaseMode) {
+            String onlySpecifiedDatabase, String isLowerCaseTableNames, String oceanbaseMode, Map includeDatabaseMap,
+            Map excludeDatabaseMap) {
         this.jdbcUser = user;
         this.isOnlySpecifiedDatabase = Boolean.valueOf(onlySpecifiedDatabase).booleanValue();
         this.isLowerCaseTableNames = Boolean.valueOf(isLowerCaseTableNames).booleanValue();
-        if (specifiedDatabaseMap != null) {
-            this.specifiedDatabaseMap = specifiedDatabaseMap;
+        if (includeDatabaseMap != null) {
+            this.includeDatabaseMap = includeDatabaseMap;
+        }
+        if (excludeDatabaseMap != null) {
+            this.excludeDatabaseMap = excludeDatabaseMap;
         }
         this.oceanbaseMode = oceanbaseMode;
         try {
@@ -180,7 +184,7 @@ public class JdbcClient {
         Connection conn = getConnection();
         Statement stmt = null;
         ResultSet rs = null;
-        if (isOnlySpecifiedDatabase && specifiedDatabaseMap.isEmpty()) {
+        if (isOnlySpecifiedDatabase && includeDatabaseMap.isEmpty() && excludeDatabaseMap.isEmpty()) {
             return getSpecifiedDatabase(conn);
         }
         List<String> databaseNames = Lists.newArrayList();
@@ -207,6 +211,7 @@ public class JdbcClient {
                     rs = stmt.executeQuery("SELECT SCHEMA_NAME FROM SYS.SCHEMAS WHERE HAS_PRIVILEGES = 'TRUE'");
                     break;
                 case JdbcResource.TRINO:
+                case JdbcResource.PRESTO:
                     rs = stmt.executeQuery("SHOW SCHEMAS");
                     break;
                 default:
@@ -216,11 +221,16 @@ public class JdbcClient {
             while (rs.next()) {
                 tempDatabaseNames.add(rs.getString(1));
             }
-            if (isOnlySpecifiedDatabase && !specifiedDatabaseMap.isEmpty()) {
+            if (isOnlySpecifiedDatabase) {
                 for (String db : tempDatabaseNames) {
-                    if (specifiedDatabaseMap.get(db) != null) {
-                        databaseNames.add(db);
+                    // Exclude database map take effect with higher priority over include database map
+                    if (!excludeDatabaseMap.isEmpty() && excludeDatabaseMap.containsKey(db)) {
+                        continue;
                     }
+                    if (!includeDatabaseMap.isEmpty() && includeDatabaseMap.containsKey(db)) {
+                        continue;
+                    }
+                    databaseNames.add(db);
                 }
             } else {
                 databaseNames = tempDatabaseNames;
@@ -247,6 +257,7 @@ public class JdbcClient {
                 case JdbcResource.SQLSERVER:
                 case JdbcResource.SAP_HANA:
                 case JdbcResource.TRINO:
+                case JdbcResource.PRESTO:
                 case JdbcResource.OCEANBASE_ORACLE:
                     databaseNames.add(conn.getSchema());
                     break;
@@ -269,6 +280,7 @@ public class JdbcClient {
         ResultSet rs = null;
         List<String> tablesName = Lists.newArrayList();
         String[] types = {"TABLE", "VIEW"};
+        String[] hanaTypes = {"TABLE", "VIEW", "OLAP VIEW", "JOIN VIEW", "HIERARCHY VIEW", "CALC VIEW"};
         try {
             DatabaseMetaData databaseMetaData = conn.getMetaData();
             String catalogName = conn.getCatalog();
@@ -281,11 +293,14 @@ public class JdbcClient {
                 case JdbcResource.ORACLE:
                 case JdbcResource.CLICKHOUSE:
                 case JdbcResource.SQLSERVER:
-                case JdbcResource.SAP_HANA:
                 case JdbcResource.OCEANBASE_ORACLE:
                     rs = databaseMetaData.getTables(null, dbName, null, types);
                     break;
+                case JdbcResource.SAP_HANA:
+                    rs = databaseMetaData.getTables(null, dbName, null, hanaTypes);
+                    break;
                 case JdbcResource.TRINO:
+                case JdbcResource.PRESTO:
                     rs = databaseMetaData.getTables(catalogName, dbName, null, types);
                     break;
                 default:
@@ -311,6 +326,7 @@ public class JdbcClient {
         Connection conn = getConnection();
         ResultSet rs = null;
         String[] types = {"TABLE", "VIEW"};
+        String[] hanaTypes = {"TABLE", "VIEW", "OLAP VIEW", "JOIN VIEW", "HIERARCHY VIEW", "CALC VIEW"};
         try {
             DatabaseMetaData databaseMetaData = conn.getMetaData();
             String catalogName = conn.getCatalog();
@@ -323,11 +339,14 @@ public class JdbcClient {
                 case JdbcResource.ORACLE:
                 case JdbcResource.CLICKHOUSE:
                 case JdbcResource.SQLSERVER:
-                case JdbcResource.SAP_HANA:
                 case JdbcResource.OCEANBASE_ORACLE:
                     rs = databaseMetaData.getTables(null, dbName, null, types);
                     break;
+                case JdbcResource.SAP_HANA:
+                    rs = databaseMetaData.getTables(null, dbName, null, hanaTypes);
+                    break;
                 case JdbcResource.TRINO:
+                case JdbcResource.PRESTO:
                     rs = databaseMetaData.getTables(catalogName, dbName, null, types);
                     break;
                 default:
@@ -405,6 +424,7 @@ public class JdbcClient {
                     rs = databaseMetaData.getColumns(null, dbName, tableName, null);
                     break;
                 case JdbcResource.TRINO:
+                case JdbcResource.PRESTO:
                     rs = databaseMetaData.getColumns(catalogName, dbName, tableName, null);
                     break;
                 default:
@@ -455,6 +475,7 @@ public class JdbcClient {
             case JdbcResource.SAP_HANA:
                 return saphanaTypeToDoris(fieldSchema);
             case JdbcResource.TRINO:
+            case JdbcResource.PRESTO:
                 return trinoTypeToDoris(fieldSchema);
             default:
                 throw new JdbcClientException("Unknown database type");
@@ -867,6 +888,8 @@ public class JdbcClient {
             fieldSchema.setDataTypeName(trinoArrType);
             Type type = trinoTypeToDoris(fieldSchema);
             return ArrayType.create(type, true);
+        } else if (trinoType.startsWith("varchar")) {
+            return ScalarType.createStringType();
         }
         switch (trinoType) {
             case "integer":
@@ -883,8 +906,6 @@ public class JdbcClient {
                 return Type.FLOAT;
             case "boolean":
                 return Type.BOOLEAN;
-            case "varchar":
-                return ScalarType.createStringType();
             case "date":
                 return ScalarType.createDateV2Type();
             default:
