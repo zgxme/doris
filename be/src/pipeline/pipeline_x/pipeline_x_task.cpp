@@ -45,14 +45,18 @@ namespace doris::pipeline {
 PipelineXTask::PipelineXTask(PipelinePtr& pipeline, uint32_t index, RuntimeState* state,
                              PipelineFragmentContext* fragment_context,
                              RuntimeProfile* parent_profile,
-                             const std::vector<TScanRangeParams>& scan_ranges, const int sender_id)
+                             const std::vector<TScanRangeParams>& scan_ranges, const int sender_id,
+                             std::shared_ptr<BufferControlBlock>& sender,
+                             std::shared_ptr<vectorized::VDataStreamRecvr>& recvr)
         : PipelineTask(pipeline, index, state, fragment_context, parent_profile),
           _scan_ranges(scan_ranges),
           _operators(pipeline->operator_xs()),
           _source(_operators.front()),
           _root(_operators.back()),
           _sink(pipeline->sink_shared_pointer()),
-          _sender_id(sender_id) {
+          _sender_id(sender_id),
+          _sender(sender),
+          _recvr(recvr) {
     _pipeline_task_watcher.start();
     _sink->get_dependency(_downstream_dependency);
 }
@@ -99,14 +103,15 @@ Status PipelineXTask::_open() {
         Dependency* dep = _upstream_dependency.find(o->id()) == _upstream_dependency.end()
                                   ? (Dependency*)nullptr
                                   : _upstream_dependency.find(o->id())->second.get();
-        LocalStateInfo info {_scan_ranges, dep};
+        LocalStateInfo info {_scan_ranges, dep, _recvr};
         Status cur_st = o->setup_local_state(_state, info);
         if (!cur_st.ok()) {
             st = cur_st;
         }
     }
-    LocalSinkStateInfo info {_sender_id, _downstream_dependency.get()};
+    LocalSinkStateInfo info {_sender_id, _downstream_dependency.get(), _sender};
     RETURN_IF_ERROR(_sink->setup_local_state(_state, info));
+    _dry_run = _sink->should_dry_run(_state);
     RETURN_IF_ERROR(st);
     _opened = true;
     return Status::OK();
@@ -142,23 +147,23 @@ Status PipelineXTask::execute(bool* eos) {
             set_state(PipelineTaskState::BLOCKED_FOR_DEPENDENCY);
             return Status::OK();
         }
-        if (!_source->can_read(_state)) {
+        if (!source_can_read()) {
             set_state(PipelineTaskState::BLOCKED_FOR_SOURCE);
             return Status::OK();
         }
-        if (!_sink->can_write(_state)) {
+        if (!sink_can_write()) {
             set_state(PipelineTaskState::BLOCKED_FOR_SINK);
             return Status::OK();
         }
     }
 
-    this->set_begin_execute_time();
+    set_begin_execute_time();
     while (!_fragment_context->is_canceled()) {
-        if (_data_state != SourceState::MORE_DATA && !_source->can_read(_state)) {
+        if (_data_state != SourceState::MORE_DATA && !source_can_read()) {
             set_state(PipelineTaskState::BLOCKED_FOR_SOURCE);
             break;
         }
-        if (!_sink->can_write(_state)) {
+        if (!sink_can_write()) {
             set_state(PipelineTaskState::BLOCKED_FOR_SINK);
             break;
         }
@@ -172,11 +177,14 @@ Status PipelineXTask::execute(bool* eos) {
         auto* block = _block.get();
 
         // Pull block from operator chain
-        {
+        if (!_dry_run) {
             SCOPED_TIMER(_get_block_timer);
             _get_block_counter->update(1);
             RETURN_IF_ERROR(_root->get_next_after_projects(_state, block, _data_state));
+        } else {
+            _data_state = SourceState::FINISHED;
         }
+
         *eos = _data_state == SourceState::FINISHED;
         if (_block->rows() != 0 || *eos) {
             SCOPED_TIMER(_sink_timer);

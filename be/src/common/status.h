@@ -113,6 +113,7 @@ E(NOT_INITIALIZED, -236);
 E(ALREADY_CANCELLED, -237);
 E(TOO_MANY_SEGMENTS, -238);
 E(ALREADY_CLOSED, -239);
+E(NEED_SEND_AGAIN, -240);
 E(CE_CMD_PARAMS_ERROR, -300);
 E(CE_BUFFER_TOO_SMALL, -301);
 E(CE_CMD_NOT_VALID, -302);
@@ -268,12 +269,14 @@ E(INVERTED_INDEX_NO_TERMS, -6005);
 E(INVERTED_INDEX_RENAME_FILE_FAILED, -6006);
 E(INVERTED_INDEX_EVALUATE_SKIPPED, -6007);
 E(INVERTED_INDEX_BUILD_WAITTING, -6008);
+E(KEY_NOT_FOUND, -6009);
+E(KEY_ALREADY_EXISTS, -6010);
 #undef E
 } // namespace ErrorCode
 
 // clang-format off
 // whether to capture stacktrace
-consteval bool capture_stacktrace(int code) {
+constexpr bool capture_stacktrace(int code) {
     return code != ErrorCode::OK
         && code != ErrorCode::END_OF_FILE
         && code != ErrorCode::MEM_LIMIT_EXCEEDED
@@ -282,6 +285,7 @@ consteval bool capture_stacktrace(int code) {
         && code != ErrorCode::TOO_MANY_VERSION
         && code != ErrorCode::ALREADY_CANCELLED
         && code != ErrorCode::ALREADY_CLOSED
+        && code != ErrorCode::NEED_SEND_AGAIN
         && code != ErrorCode::PUSH_TRANSACTION_ALREADY_EXIST
         && code != ErrorCode::BE_NO_SUITABLE_VERSION
         && code != ErrorCode::CUMULATIVE_NO_SUITABLE_VERSION
@@ -305,13 +309,19 @@ consteval bool capture_stacktrace(int code) {
         && code != ErrorCode::TRANSACTION_NOT_EXIST
         && code != ErrorCode::TRANSACTION_ALREADY_VISIBLE
         && code != ErrorCode::TOO_MANY_TRANSACTIONS
-        && code != ErrorCode::TRANSACTION_ALREADY_COMMITTED;
+        && code != ErrorCode::TRANSACTION_ALREADY_COMMITTED
+        && code != ErrorCode::KEY_NOT_FOUND
+        && code != ErrorCode::KEY_ALREADY_EXISTS
+        && code != ErrorCode::CANCELLED
+        && code != ErrorCode::UNINITIALIZED
+        && code != ErrorCode::PIP_WAIT_FOR_RF
+        && code != ErrorCode::PIP_WAIT_FOR_SC;
 }
 // clang-format on
 
 class Status {
 public:
-    Status() : _code(ErrorCode::OK) {}
+    Status() : _code(ErrorCode::OK), _err_msg(nullptr) {}
 
     // copy c'tor makes copy of error detail so Status can be returned by value
     Status(const Status& rhs) { *this = rhs; }
@@ -329,7 +339,13 @@ public:
     }
 
     // move assign
-    Status& operator=(Status&& rhs) noexcept = default;
+    Status& operator=(Status&& rhs) noexcept {
+        _code = rhs._code;
+        if (rhs._err_msg) {
+            _err_msg = std::move(rhs._err_msg);
+        }
+        return *this;
+    }
 
     Status static create(const TStatus& status) {
         return Error<true>(status.status_code,
@@ -371,7 +387,7 @@ public:
             status._err_msg->_msg = fmt::format(msg, std::forward<Args>(args)...);
         }
 #ifdef ENABLE_STACKTRACE
-        if constexpr (stacktrace) {
+        if (stacktrace && capture_stacktrace(code)) {
             status._err_msg->_stack = get_stack_trace();
             LOG(WARNING) << "meet error status: " << status; // may print too many stacks.
         }
@@ -381,10 +397,10 @@ public:
 
     static Status OK() { return Status(); }
 
-#define ERROR_CTOR(name, code)                                                  \
-    template <typename... Args>                                                 \
-    static Status name(std::string_view msg, Args&&... args) {                  \
-        return Error<ErrorCode::code, false>(msg, std::forward<Args>(args)...); \
+#define ERROR_CTOR(name, code)                                                 \
+    template <typename... Args>                                                \
+    static Status name(std::string_view msg, Args&&... args) {                 \
+        return Error<ErrorCode::code, true>(msg, std::forward<Args>(args)...); \
     }
 
     ERROR_CTOR(PublishTimeout, PUBLISH_TIMEOUT)
@@ -413,6 +429,7 @@ public:
     ERROR_CTOR(DataQualityError, DATA_QUALITY_ERROR)
     ERROR_CTOR(NotAuthorized, NOT_AUTHORIZED)
     ERROR_CTOR(HttpError, HTTP_ERROR)
+    ERROR_CTOR(NeedSendAgain, NEED_SEND_AGAIN)
 #undef ERROR_CTOR
 
     template <int code>

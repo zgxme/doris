@@ -193,89 +193,7 @@ PFilterType get_type(RuntimeFilterType type) {
 }
 
 Status create_literal(const TypeDescriptor& type, const void* data, vectorized::VExprSPtr& expr) {
-    TExprNode node;
-
-    switch (type.type) {
-    case TYPE_BOOLEAN: {
-        create_texpr_literal_node<TYPE_BOOLEAN>(data, &node);
-        break;
-    }
-    case TYPE_TINYINT: {
-        create_texpr_literal_node<TYPE_TINYINT>(data, &node);
-        break;
-    }
-    case TYPE_SMALLINT: {
-        create_texpr_literal_node<TYPE_SMALLINT>(data, &node);
-        break;
-    }
-    case TYPE_INT: {
-        create_texpr_literal_node<TYPE_INT>(data, &node);
-        break;
-    }
-    case TYPE_BIGINT: {
-        create_texpr_literal_node<TYPE_BIGINT>(data, &node);
-        break;
-    }
-    case TYPE_LARGEINT: {
-        create_texpr_literal_node<TYPE_LARGEINT>(data, &node);
-        break;
-    }
-    case TYPE_FLOAT: {
-        create_texpr_literal_node<TYPE_FLOAT>(data, &node);
-        break;
-    }
-    case TYPE_DOUBLE: {
-        create_texpr_literal_node<TYPE_DOUBLE>(data, &node);
-        break;
-    }
-    case TYPE_DATEV2: {
-        create_texpr_literal_node<TYPE_DATEV2>(data, &node);
-        break;
-    }
-    case TYPE_DATETIMEV2: {
-        create_texpr_literal_node<TYPE_DATETIMEV2>(data, &node);
-        break;
-    }
-    case TYPE_DATE: {
-        create_texpr_literal_node<TYPE_DATE>(data, &node);
-        break;
-    }
-    case TYPE_DATETIME: {
-        create_texpr_literal_node<TYPE_DATETIME>(data, &node);
-        break;
-    }
-    case TYPE_DECIMALV2: {
-        create_texpr_literal_node<TYPE_DECIMALV2>(data, &node, type.precision, type.scale);
-        break;
-    }
-    case TYPE_DECIMAL32: {
-        create_texpr_literal_node<TYPE_DECIMAL32>(data, &node, type.precision, type.scale);
-        break;
-    }
-    case TYPE_DECIMAL64: {
-        create_texpr_literal_node<TYPE_DECIMAL64>(data, &node, type.precision, type.scale);
-        break;
-    }
-    case TYPE_DECIMAL128I: {
-        create_texpr_literal_node<TYPE_DECIMAL128I>(data, &node, type.precision, type.scale);
-        break;
-    }
-    case TYPE_CHAR: {
-        create_texpr_literal_node<TYPE_CHAR>(data, &node);
-        break;
-    }
-    case TYPE_VARCHAR: {
-        create_texpr_literal_node<TYPE_VARCHAR>(data, &node);
-        break;
-    }
-    case TYPE_STRING: {
-        create_texpr_literal_node<TYPE_STRING>(data, &node);
-        break;
-    }
-    default:
-        DCHECK(false);
-        return Status::InvalidArgument("Invalid type!");
-    }
+    TExprNode node = create_texpr_node_from(data, type.type, type.precision, type.scale);
 
     try {
         expr = vectorized::VLiteral::create_shared(node);
@@ -1490,7 +1408,6 @@ void IRuntimeFilter::init_profile(RuntimeProfile* parent_profile) {
 void IRuntimeFilter::update_runtime_filter_type_to_profile() {
     if (_profile != nullptr) {
         _profile->add_info_string("RealRuntimeFilterType", to_string(_wrapper->get_real_type()));
-        _wrapper->set_filter_id(_filter_id);
     }
 }
 
@@ -1845,7 +1762,7 @@ Status RuntimePredicateWrapper::get_push_exprs(std::list<vectorized::VExprContex
     vectorized::VExprContextSPtr probe_ctx;
     RETURN_IF_ERROR(vectorized::VExpr::create_expr_tree(probe_expr, probe_ctx));
     probe_ctxs.push_back(probe_ctx);
-
+    set_filter_id(_filter_id);
     DCHECK(probe_ctx->root()->type().type == _column_return_type ||
            (is_string_type(probe_ctx->root()->type().type) &&
             is_string_type(_column_return_type)) ||

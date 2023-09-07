@@ -86,7 +86,6 @@ public:
     Block() = default;
     Block(std::initializer_list<ColumnWithTypeAndName> il);
     Block(const ColumnsWithTypeAndName& data_);
-    Block(const PBlock& pblock);
     Block(const std::vector<SlotDescriptor*>& slots, size_t block_size,
           bool ignore_trivial_slot = false);
 
@@ -284,7 +283,7 @@ public:
     // copy a new block by the offset column
     Block copy_block(const std::vector<int>& column_offset) const;
 
-    void append_block_by_selector(MutableBlock* dst, const IColumn::Selector& selector) const;
+    void append_to_block_by_selector(MutableBlock* dst, const IColumn::Selector& selector) const;
 
     // need exception safety
     static void filter_block_internal(Block* block, const std::vector<uint32_t>& columns_to_filter,
@@ -307,6 +306,8 @@ public:
     Status serialize(int be_exec_version, PBlock* pblock, size_t* uncompressed_bytes,
                      size_t* compressed_bytes, segment_v2::CompressionTypePB compression_type,
                      bool allow_transfer_large_data = false) const;
+
+    Status deserialize(const PBlock& pblock);
 
     std::unique_ptr<Block> create_same_struct_block(size_t size) const;
 
