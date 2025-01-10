@@ -695,6 +695,11 @@ if [[ "${RUN_KERBEROS}" -eq 1 ]]; then
     pids["kerberos"]=$!
 fi
 
+if [[ "${RUN_KERBEROS}" -eq 1 ]]; then
+    start_kerberos > start_kerberos.log 2>&1 &
+    pids["kerberos"]=$!
+fi
+
 echo "waiting all dockers starting done"
 
 for compose in "${!pids[@]}"; do
@@ -709,4 +714,6 @@ for compose in "${!pids[@]}"; do
     fi
 done
 
+echo "docker started"
+docker ps -a --format "{{.ID}} | {{.Image}} | {{.Status}}"
 echo "all dockers started successfully"
