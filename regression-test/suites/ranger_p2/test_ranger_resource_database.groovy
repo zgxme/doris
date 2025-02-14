@@ -120,7 +120,7 @@ suite("test_ranger_resource_database", "p2,ranger,external") {
 		// create policy
 		RangerClient rangerClient = new RangerClient("http://${rangerEndpoint}", "simple", rangerUser, rangerPassword, null)
 		String policy1 = 'ranger_test_db_policy_1'
-		List<String> catalogPolicy = ["GRANT", "SELECT", "LOAD", "ALTER", "CREATE", "DROP", "SHOW_VIEW"]
+		List<String> dbPolicy = ["GRANT", "SELECT", "LOAD", "ALTER", "CREATE", "DROP", "SHOW_VIEW"]
 
 		Map<String, RangerPolicy.RangerPolicyResource> resource = new HashMap<>()
 		resource.put("catalog", new RangerPolicy.RangerPolicyResource("internal"))
@@ -134,7 +134,7 @@ suite("test_ranger_resource_database", "p2,ranger,external") {
 		policyItem.setUsers([userList[0]])
 
 		List<RangerPolicy.RangerPolicyItemAccess> policyItemAccesses = new ArrayList<RangerPolicy.RangerPolicyItemAccess>()
-		catalogPolicy.forEach {
+		dbPolicy.forEach {
 			policyItemAccesses.add(new RangerPolicy.RangerPolicyItemAccess(it))
 		}
 		policyItem.setAccesses(policyItemAccesses)
@@ -191,7 +191,6 @@ suite("test_ranger_resource_database", "p2,ranger,external") {
 		createdPolicy = rangerClient.createPolicy(policy)
 		println("New Policy created with id: " + createdPolicy.getId())
 		sleep(6000)
-		rangerClient.deletePolicy(rangerServiceName, policy3)
 		checkDatabaseAccess("hive", "allow", userList[2], pwd, catalog1, catalogDbList[0], 'ranger_test_catalog_table_1')
 		checkDatabaseAccess("hive", "deny", userList[2], pwd, catalog1, catalogDbList[1], 'ranger_test_catalog_table_2')
 		rangerClient.deletePolicy(rangerServiceName, policy3)

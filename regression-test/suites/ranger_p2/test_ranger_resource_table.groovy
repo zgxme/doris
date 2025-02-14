@@ -123,7 +123,7 @@ suite("test_ranger_resource_table", "p2,ranger,external") {
 		// create policy
 		RangerClient rangerClient = new RangerClient("http://${rangerEndpoint}", "simple", rangerUser, rangerPassword, null)
 		String policy1 = 'ranger_test_table_policy_1'
-		List<String> catalogPolicy = ["GRANT", "SELECT", "LOAD", "ALTER", "CREATE", "DROP", "SHOW_VIEW"]
+		List<String> tablePolicy = ["GRANT", "SELECT", "LOAD", "ALTER", "CREATE", "DROP", "SHOW_VIEW"]
 
 		Map<String, RangerPolicy.RangerPolicyResource> resource = new HashMap<>()
 		resource.put("catalog", new RangerPolicy.RangerPolicyResource("internal"))
@@ -137,7 +137,7 @@ suite("test_ranger_resource_table", "p2,ranger,external") {
 		policyItem.setUsers([userList[0]])
 
 		List<RangerPolicy.RangerPolicyItemAccess> policyItemAccesses = new ArrayList<RangerPolicy.RangerPolicyItemAccess>()
-		catalogPolicy.forEach {
+		tablePolicy.forEach {
 			policyItemAccesses.add(new RangerPolicy.RangerPolicyItemAccess(it))
 		}
 		policyItem.setAccesses(policyItemAccesses)
