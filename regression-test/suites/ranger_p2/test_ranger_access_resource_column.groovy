@@ -19,7 +19,7 @@ import org.apache.ranger.RangerClient
 import org.apache.ranger.plugin.model.RangerPolicy
 
 
-suite("test_ranger_resource_column", "p2,ranger,external") {
+suite("test_ranger_access_resource_column", "p2,ranger,external") {
 	def tokens = context.config.jdbcUrl.split('/')
 	def defaultJdbcUrl = tokens[0] + "//" + tokens[2] + "/?"
 	def checkColumnAccess = { catalogType, access, user, password, catalog, dbName, tableName, columns ->

@@ -18,10 +18,11 @@
 import org.apache.ranger.RangerClient
 import org.apache.ranger.plugin.model.RangerPolicy
 
-suite("test_ranger_resource_catalog", "p2,ranger,external") {
+
+suite("test_ranger_access_resource_database", "p2,ranger,external") {
 	def tokens = context.config.jdbcUrl.split('/')
 	def defaultJdbcUrl = tokens[0] + "//" + tokens[2] + "/?"
-	def checkCatalogAccess = { catalogType, access, user, password, catalog, dbName, tableName ->
+	def checkDatabaseAccess = { catalogType, access, user, password, catalog, dbName, tableName ->
 		connect("$user", "$password", "$defaultJdbcUrl") {
 			def executeSqlWithLogging = { sqlStatement, errorMessage ->
 				try {
@@ -36,8 +37,6 @@ suite("test_ranger_resource_catalog", "p2,ranger,external") {
 			}
 			if (catalogType == "internal") {
 				executeSqlWithLogging("""SWITCH ${catalog}""", "Error executing SWITCH")
-				executeSqlWithLogging("""DROP DATABASE IF EXISTS ${dbName}""", "Error executing DROP DATABASE")
-				executeSqlWithLogging("""CREATE DATABASE IF NOT EXISTS ${dbName}""", "Error executing CREATE DATABASE")
 				executeSqlWithLogging("""
 				    CREATE TABLE IF NOT EXISTS ${dbName}.`${tableName}` (
 				        id BIGINT,
@@ -54,11 +53,10 @@ suite("test_ranger_resource_catalog", "p2,ranger,external") {
 				executeSqlWithLogging("""CREATE VIEW ${dbName}.test_view AS SELECT * FROM ${dbName}.${tableName}""", "Error executing CREATE VIEW")
 				executeSqlWithLogging("""SELECT * FROM ${dbName}.test_view""", "Error executing SELECT VIEW")
 				executeSqlWithLogging("""SHOW CREATE VIEW ${dbName}.test_view""", "Error executing SHOW CREATE VIEW")
+				executeSqlWithLogging("""DROP TABLE ${dbName}.${tableName}""", "Error executing DROP DATABASE")
 				executeSqlWithLogging("""DROP DATABASE ${dbName}""", "Error executing DROP DATABASE")
 			} else if (catalogType == "hive") {
 				executeSqlWithLogging("""SWITCH ${catalog}""", "Error executing SWITCH")
-				executeSqlWithLogging("""DROP DATABASE IF EXISTS ${dbName}""", "Error executing DROP DATABASE")
-				executeSqlWithLogging("""CREATE DATABASE IF NOT EXISTS ${dbName}""", "Error executing CREATE DATABASE")
 				executeSqlWithLogging("""
 				    CREATE TABLE IF NOT EXISTS ${dbName}.`${tableName}` (
 				      id BIGINT,
@@ -74,19 +72,8 @@ suite("test_ranger_resource_catalog", "p2,ranger,external") {
 				executeSqlWithLogging("""CREATE VIEW ${dbName}.test_view AS SELECT * FROM ${dbName}.${tableName}""", "Error executing CREATE VIEW")
 				executeSqlWithLogging("""SELECT * FROM ${dbName}.test_view""", "Error executing SELECT VIEW")
 				executeSqlWithLogging("""SHOW CREATE VIEW ${dbName}.test_view""", "Error executing SHOW CREATE VIEW")
+				executeSqlWithLogging("""DROP TABLE ${dbName}.${tableName}""", "Error executing DROP DATABASE")
 				executeSqlWithLogging("""DROP DATABASE ${dbName}""", "Error executing DROP DATABASE")
-				executeSqlWithLogging("""DROP CATALOG ${catalog}""", "Error executing DROP CATALOG")
-			} else if (catalogType == "jdbc") {
-				executeSqlWithLogging("""SWITCH ${catalog}""", "Error executing SWITCH")
-				executeSqlWithLogging("""CALL EXECUTE_STMT ('${catalog}', 'CREATE DATABASE IF NOT EXISTS ${dbName}')""", "Error executing CREATE DATABASE")
-				executeSqlWithLogging("""CALL EXECUTE_STMT ('${catalog}', 'CREATE TABLE IF NOT EXISTS ${dbName}.${tableName} (id BIGINT, username VARCHAR(20))')""", "Error executing CREATE TABLE")
-				executeSqlWithLogging("""CALL EXECUTE_STMT ('${catalog}', 'INSERT INTO ${dbName}.${tableName} VALUES (1, ''test'')')""", "Error executing INSERT")
-				executeSqlWithLogging("""SELECT * FROM ${dbName}.${tableName}""", "Error executing SELECT")
-				executeSqlWithLogging("""CALL EXECUTE_STMT ('${catalog}', 'ALTER TABLE ${dbName}.${tableName} ADD COLUMN age INT')""", "Error executing ALTER TABLE")
-				executeSqlWithLogging("""CREATE VIEW ${dbName}.test_view AS SELECT * FROM ${dbName}.${tableName}""", "Error executing CREATE VIEW")
-				executeSqlWithLogging("""SELECT * FROM ${dbName}.test_view""", "Error executing SELECT VIEW")
-				executeSqlWithLogging("""SHOW CREATE VIEW ${dbName}.test_view""", "Error executing SHOW CREATE VIEW")
-				executeSqlWithLogging("""CALL EXECUTE_STMT ('${catalog}', 'DROP DATABASE ${dbName}')""", "Error executing DROP DATABASE")
 				executeSqlWithLogging("""DROP CATALOG ${catalog}""", "Error executing DROP CATALOG")
 			}
 		}
@@ -99,64 +86,55 @@ suite("test_ranger_resource_catalog", "p2,ranger,external") {
 	String rangerServiceName = context.config.otherConfigs.get("rangerServiceName")
 	String externalEnvIp = context.config.otherConfigs.get("externalEnvIp")
 	String HmsPort = context.config.otherConfigs.get("hive3HmsPort")
-	String jdbcUrl = context.config.jdbcUrl + "&sessionVariables=return_object_data_as_binary=true"
-	String jdbcUser = context.config.jdbcUser
-	String jdbcPassword = context.config.jdbcPassword
-	String s3Endpoint = getS3Endpoint()
-	String bucket = getS3BucketName()
-	String driverUrl = "https://${bucket}.${s3Endpoint}/regression/jdbc_driver/mysql-connector-java-8.0.25.jar"
 
 	if (enabled != null && enabled.equalsIgnoreCase("true")) {
-		String catalog1 = 'ranger_test_catalog_1'
-		String catalog2 = 'ranger_test_catalog_2'
+		String catalog1 = 'ranger_catalog_3'
 		// prepare catalog
 		sql """DROP CATALOG IF EXISTS ${catalog1}"""
-		sql """DROP CATALOG IF EXISTS ${catalog2}"""
 		sql """CREATE CATALOG `${catalog1}` PROPERTIES (
 			"type"="hms",
 			'hive.metastore.uris' = 'thrift://${externalEnvIp}:${HmsPort}'
 		)"""
 
-		sql """ CREATE CATALOG `${catalog2}` PROPERTIES (
-        "user" = "${jdbcUser}",
-        "type" = "jdbc",
-        "password" = "${jdbcPassword}",
-        "jdbc_url" = "${jdbcUrl}",
-        "driver_url" = "${driverUrl}",
-        "driver_class" = "com.mysql.cj.jdbc.Driver"
-        )"""
-		// prepare doris user
-		String user1 = 'ranger_test_catalog_user_1'
-		String user2 = 'ranger_test_catalog_user_2'
-		String user3 = 'ranger_test_catalog_user_3'
-		String pwd = 'C123_567p'
-		sql """DROP USER IF EXISTS ${user1}"""
-		sql """DROP USER IF EXISTS ${user2}"""
-		sql """DROP USER IF EXISTS ${user3}"""
-		sql """CREATE USER '${user1}' IDENTIFIED BY '${pwd}'"""
-		sql """CREATE USER '${user2}' IDENTIFIED BY '${pwd}'"""
-		sql """CREATE USER '${user3}' IDENTIFIED BY '${pwd}'"""
-		// prepare ranger user
-		createRangerUser(user1, pwd, ["ROLE_USER"] as String[])
+		// prepare database
+		List<String> catalogDbList = ['ranger_test_catalog3_db_1', 'ranger_test_catalog3_db_2']
+		List<String> internalDbList = ['ranger_test_internal_db_1', 'ranger_test_internal_db_2']
+		catalogDbList.forEach {
+			sql """DROP DATABASE IF EXISTS ${catalog1}.${it}"""
+			sql """CREATE DATABASE IF NOT EXISTS ${catalog1}.${it}"""
+		}
+		internalDbList.forEach {
+			sql """DROP DATABASE IF EXISTS ${it}"""
+			sql """CREATE DATABASE IF NOT EXISTS ${it}"""
+		}
 
+		// prepare user
+		List<String> userList = ['ranger_test_db_user_1', 'ranger_test_db_user_2', 'ranger_test_db_user_3',
+		                         'ranger_test_db_user_4', 'ranger_test_db_user_5']
+		String pwd = 'C123_567p'
+		userList.forEach {
+			sql """DROP USER IF EXISTS ${it}"""
+			sql """CREATE USER '${it}' IDENTIFIED BY '${pwd}'"""
+		}
 		// case1
 		// create policy
 		RangerClient rangerClient = new RangerClient("http://${rangerEndpoint}", "simple", rangerUser, rangerPassword, null)
-		String policy1 = 'ranger_test_catalog_policy_1'
-		List<String> catalogPolicy = ["GRANT", "SELECT", "LOAD", "ALTER", "CREATE", "DROP", "SHOW_VIEW"]
+		String policy1 = 'ranger_test_db_policy_1'
+		List<String> dbPolicy = ["GRANT", "SELECT", "LOAD", "ALTER", "CREATE", "DROP", "SHOW_VIEW"]
 
 		Map<String, RangerPolicy.RangerPolicyResource> resource = new HashMap<>()
 		resource.put("catalog", new RangerPolicy.RangerPolicyResource("internal"))
+		resource.put("database", new RangerPolicy.RangerPolicyResource(internalDbList[0]))
 		RangerPolicy policy = new RangerPolicy()
-
 
 		policy.setService(rangerServiceName)
 		policy.setName(policy1)
 		policy.setResources(resource)
 		RangerPolicy.RangerPolicyItem policyItem = new RangerPolicy.RangerPolicyItem()
-		policyItem.setUsers([user1])
+		policyItem.setUsers([userList[0]])
+
 		List<RangerPolicy.RangerPolicyItemAccess> policyItemAccesses = new ArrayList<RangerPolicy.RangerPolicyItemAccess>()
-		catalogPolicy.forEach {
+		dbPolicy.forEach {
 			policyItemAccesses.add(new RangerPolicy.RangerPolicyItemAccess(it))
 		}
 		policyItem.setAccesses(policyItemAccesses)
@@ -171,18 +149,18 @@ suite("test_ranger_resource_catalog", "p2,ranger,external") {
 		// sleep 6s to wait for ranger policy to take effect
 		// ranger.plugin.doris.policy.pollIntervalMs is 5000ms in ranger-doris-security.xml
 		sleep(6000)
-		checkCatalogAccess("internal", "allow", user1, pwd, "internal", 'ranger_test_catalog_db_1', 'ranger_test_catalog_table_1')
-		checkCatalogAccess("hive", "deny", user1, pwd, catalog1, 'ranger_test_catalog_db_2', 'ranger_test_catalog_table_2')
-		checkCatalogAccess("jdbc", "deny", user1, pwd, catalog2, 'ranger_test_catalog_db_3', 'ranger_test_catalog_table_3')
+		checkDatabaseAccess("internal", "allow", userList[0], pwd, "internal", internalDbList[0], 'ranger_test_internal_table_1')
+		checkDatabaseAccess("internal", "deny", userList[0], pwd, "internal", internalDbList[1], 'ranger_test_internal_table_2')
 		rangerClient.deletePolicy(rangerServiceName, policy1)
 
 		// case2
-		String policy2 = 'ranger_test_catalog_policy_2'
+		String policy2 = 'ranger_test_db_policy_2'
 		policy.setName(policy2)
 		resource.clear()
-		resource.put("catalog", new RangerPolicy.RangerPolicyResource(catalog1))
+		resource.put("catalog", new RangerPolicy.RangerPolicyResource("internal"))
+		resource.put("database", new RangerPolicy.RangerPolicyResource("*"))
 		policy.setResources(resource)
-		policyItem.setUsers([user2])
+		policyItem.setUsers([userList[1]])
 		try {
 			rangerClient.deletePolicy(rangerServiceName, policy2)
 		} catch (Exception e) {
@@ -190,21 +168,21 @@ suite("test_ranger_resource_catalog", "p2,ranger,external") {
 		}
 		createdPolicy = rangerClient.createPolicy(policy)
 		println("New Policy created with id: " + createdPolicy.getId())
+		System.out.println("New Policy created with id: " + createdPolicy.getId())
 		sleep(6000)
-
-		checkCatalogAccess("hive", "allow", user2, pwd, catalog1, 'ranger_test_catalog_db_2', 'ranger_test_catalog_table_2')
-		checkCatalogAccess("internal", "deny", user2, pwd, "internal", 'ranger_test_catalog_db_1', 'ranger_test_catalog_table_1')
-		checkCatalogAccess("jdbc", "deny", user2, pwd, catalog2, 'ranger_test_catalog_db_3', 'ranger_test_catalog_table_3')
+		checkDatabaseAccess("internal", "allow", userList[1], pwd, "internal", internalDbList[0], 'ranger_test_internal_table_1')
+		checkDatabaseAccess("internal", "allow", userList[1], pwd, "internal", internalDbList[1], 'ranger_test_internal_table_2')
+		checkDatabaseAccess("hive", "deny", userList[1], pwd, catalog1, catalogDbList[0], 'ranger_test_catalog_table_1')
 		rangerClient.deletePolicy(rangerServiceName, policy2)
 
 		// case3
-		String policy3 = 'ranger_test_catalog_policy_3'
+		String policy3 = 'ranger_test_db_policy_3'
 		policy.setName(policy3)
 		resource.clear()
-		resource.put("catalog", new RangerPolicy.RangerPolicyResource("*"))
+		resource.put("catalog", new RangerPolicy.RangerPolicyResource(catalog1))
+		resource.put("database", new RangerPolicy.RangerPolicyResource(catalogDbList[0]))
 		policy.setResources(resource)
-		policyItem.setUsers([user3])
-
+		policyItem.setUsers([userList[2]])
 		try {
 			rangerClient.deletePolicy(rangerServiceName, policy3)
 		} catch (Exception e) {
@@ -213,9 +191,53 @@ suite("test_ranger_resource_catalog", "p2,ranger,external") {
 		createdPolicy = rangerClient.createPolicy(policy)
 		println("New Policy created with id: " + createdPolicy.getId())
 		sleep(6000)
-		checkCatalogAccess("hive", "allow", user3, pwd, catalog1, 'ranger_test_catalog_db_2', 'ranger_test_catalog_table_2')
-		checkCatalogAccess("internal", "allow", user3, pwd, "internal", 'ranger_test_catalog_db_1', 'ranger_test_catalog_table_1')
-		checkCatalogAccess("jdbc", "allow", user3, pwd, catalog2, 'ranger_test_catalog_db_3', 'ranger_test_catalog_table_3')
+		checkDatabaseAccess("hive", "allow", userList[2], pwd, catalog1, catalogDbList[0], 'ranger_test_catalog_table_1')
+		checkDatabaseAccess("hive", "deny", userList[2], pwd, catalog1, catalogDbList[1], 'ranger_test_catalog_table_2')
 		rangerClient.deletePolicy(rangerServiceName, policy3)
+
+		// case4
+		String policy4 = 'ranger_test_db_policy_4'
+		policy.setName(policy4)
+		resource.clear()
+		resource.put("catalog", new RangerPolicy.RangerPolicyResource(catalog1))
+		resource.put("database", new RangerPolicy.RangerPolicyResource("*"))
+		policy.setResources(resource)
+		policyItem.setUsers([userList[3]])
+		try {
+			rangerClient.deletePolicy(rangerServiceName, policy4)
+		} catch (Exception e) {
+			log.info("Policy not found: ${e.getMessage()}")
+		}
+		createdPolicy = rangerClient.createPolicy(policy)
+		println("New Policy created with id: " + createdPolicy.getId())
+		sleep(6000)
+		checkDatabaseAccess("hive", "allow", userList[3], pwd, catalog1, catalogDbList[0], 'ranger_test_catalog_table_1')
+		checkDatabaseAccess("hive", "allow", userList[3], pwd, catalog1, catalogDbList[1], 'ranger_test_catalog_table_2')
+		checkDatabaseAccess("internal", "deny", userList[3], pwd, "internal", internalDbList[0], 'ranger_test_internal_table_1')
+		checkDatabaseAccess("internal", "deny", userList[3], pwd, "internal", internalDbList[1], 'ranger_test_internal_table_2')
+		rangerClient.deletePolicy(rangerServiceName, policy4)
+
+		// case5
+		String policy5 = 'ranger_test_db_policy_5'
+		policy.setName(policy5)
+		resource.clear()
+		resource.put("catalog", new RangerPolicy.RangerPolicyResource("*"))
+		resource.put("database", new RangerPolicy.RangerPolicyResource("*"))
+		policy.setResources(resource)
+		policyItem.setUsers([userList[4]])
+		try {
+			rangerClient.deletePolicy(rangerServiceName, policy5)
+		} catch (Exception e) {
+			log.info("Policy not found: ${e.getMessage()}")
+		}
+		createdPolicy = rangerClient.createPolicy(policy)
+		println("New Policy created with id: " + createdPolicy.getId())
+		sleep(6000)
+		checkDatabaseAccess("hive", "allow", userList[4], pwd, catalog1, catalogDbList[0], 'ranger_test_catalog_table_1')
+		checkDatabaseAccess("hive", "allow", userList[4], pwd, catalog1, catalogDbList[1], 'ranger_test_catalog_table_2')
+		checkDatabaseAccess("internal", "allow", userList[4], pwd, "internal", internalDbList[0], 'ranger_test_internal_table_1')
+		checkDatabaseAccess("internal", "allow", userList[4], pwd, "internal", internalDbList[1], 'ranger_test_internal_table_2')
+		rangerClient.deletePolicy(rangerServiceName, policy5)
+
 	}
 }
