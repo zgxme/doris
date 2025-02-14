@@ -39,7 +39,7 @@ suite("test_ranger_access_resource_table", "p2,ranger,external") {
 				executeSqlWithLogging("""SWITCH ${catalog}""", "Error executing SWITCH")
 				executeSqlWithLogging("""USE ${dbName}""", "Error executing USE")
 				executeSqlWithLogging("""
-				    CREATE TABLE IF NOT EXISTS ${tableName}S (
+				    CREATE TABLE IF NOT EXISTS ${tableName} (
 				        id BIGINT,
 				        username VARCHAR(20)
 				    )
