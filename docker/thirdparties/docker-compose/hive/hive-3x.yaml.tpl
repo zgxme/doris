@@ -54,6 +54,52 @@ services:
       retries: 120
     network_mode: "host"
 
+  resourcemanager:
+    image: bde2020/hadoop-resourcemanager:2.0.0-hadoop3.1.2-java8
+    restart: always
+    env_file:
+      - ./hadoop-hive-3x.env
+    container_name: ${CONTAINER_UID}hadoop3-resourcemanager
+    healthcheck:
+      test: [ "CMD", "curl", "http://localhost:8088" ]
+      interval: 5s
+      timeout: 60s
+      retries: 120
+    depends_on:
+      namenode:
+        condition: service_healthy
+    network_mode: "host"
+
+  nodemanager:
+    image: bde2020/hadoop-nodemanager:2.0.0-hadoop3.1.2-java8
+    restart: always
+    env_file:
+      - ./hadoop-hive-3x.env
+    container_name: ${CONTAINER_UID}hadoop3-nodemanager
+    depends_on:
+      datanode:
+        condition: service_healthy
+      namenode:
+        condition: service_healthy
+      resourcemanager:
+        condition: service_healthy
+    network_mode: "host"
+  
+  historyserver:
+    image: bde2020/hadoop-historyserver:2.0.0-hadoop3.1.2-java8
+    restart: always
+    env_file:
+      - ./hadoop-hive-3x.env
+    container_name: ${CONTAINER_UID}hadoop3-historyserver
+    depends_on:
+      datanode:
+        condition: service_healthy
+      namenode:
+        condition: service_healthy
+      resourcemanager:
+        condition: service_healthy
+    network_mode: "host"
+
   hive-server:
     image: doristhirdpartydocker/hive:3.1.2-postgresql-metastore
     restart: always
@@ -70,6 +116,12 @@ services:
       datanode:
         condition: service_healthy
       namenode:
+        condition: service_healthy
+      resourcemanager:
+        condition: service_healthy
+      nodemanager:
+        condition: service_healthy
+      historyserver:
         condition: service_healthy
     healthcheck:
       test: beeline -u "jdbc:hive2://127.0.0.1:${HS_PORT}/default" -n health_check -e "show databases;"
