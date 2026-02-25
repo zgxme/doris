@@ -61,7 +61,6 @@ suite("test_iceberg_sys_table", "p0,external,doris,external_docker,external_dock
             String col2 = String.valueOf(schema[1][0])
             sql """select `${col1}`, `${col2}` from ${systableName}"""
         }
-
         // WHERE filter (use file_size if exists, otherwise use the first column)
         boolean hasFileSize = schema.any { it[0] == "file_size" }
         if (hasFileSize) {
@@ -111,7 +110,7 @@ suite("test_iceberg_sys_table", "p0,external,doris,external_docker,external_dock
             }
             sql """drop database if exists internal.join_inner_db"""
             sql """create database internal.join_inner_db"""
-            sql """create table internal.join_inner_db.join_inner_tbl (`${col1}` varchar(100))"""
+            sql """create table internal.join_inner_db.join_inner_tbl (`${col1}` varchar(100)) PROPERTIES ("replication_num" = "1");"""
             sql """insert into internal.join_inner_db.join_inner_tbl values('test_val')"""
             sql """select a.`${col1}`, t.`${col1}` from ${systableName} a join internal.join_inner_db.join_inner_tbl t on a.`${col1}`=t.`${col1}` limit 1"""
             sql """drop table if exists internal.join_inner_db.join_inner_tbl"""
