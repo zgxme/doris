@@ -157,14 +157,14 @@ suite("test_iceberg_sys_table", "p0,external,doris,external_docker,external_dock
         // Re-fetch schema to avoid impact from previous definition
         schema = sql """desc ${systableName}"""
         String key = String.valueOf(schema[1][0])
-
+        String key2 = String.valueOf(schema[2][0])
         order_qt_tbl1_systable_count """select count(*) from ${systableName}"""
         order_qt_tbl1_systable_count_select """select count(${key}) from ${systableName}"""
 
-        List<List<Object>> res1 = sql """select ${key} from ${systableName} order by ${key}"""
+        List<List<Object>> res1 = sql """select ${key} from ${systableName} order by ${key},${key2}"""
         List<List<Object>> res2 = sql """select ${key} from iceberg_meta(
             "table" = "${catalog_name}.${db_name}.${tblName}",
-            "query_type" = "${systableType}") order by ${key};
+            "query_type" = "${systableType}") order by ${key},${key2};
         """
         assertEquals(res1.size(), res2.size());
         for (int i = 0; i < res1.size(); i++) {
