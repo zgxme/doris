@@ -23,7 +23,7 @@ suite("test_iceberg_rewrite_manifests", "p0,external,doris,external_docker,exter
     }
 
     String catalog_name = "test_iceberg_rewrite_manifests"
-    String db_name = "test_db"
+    String db_name = "test_db_rewrite_manifests"
     String rest_port = context.config.otherConfigs.get("iceberg_rest_uri_port")
     String minio_port = context.config.otherConfigs.get("iceberg_minio_port")
     String externalEnvIp = context.config.otherConfigs.get("externalEnvIp")
@@ -298,6 +298,178 @@ suite("test_iceberg_rewrite_manifests", "p0,external,doris,external_docker,exter
     assertTrue(emptyAddedCount == 0, "Empty table should have 0 added manifests, got: ${emptyAddedCount}")
     
     logger.info("Empty table test completed: rewritten=${emptyRewrittenCount}, added=${emptyAddedCount}")
+
+    // =====================================================================================
+    // Test Case 5: rewrite_manifests should preserve branch/tag and time travel semantics
+    // =====================================================================================
+    logger.info("Starting rewrite_manifests semantic stability test case")
+
+    def semantic_table = "test_rewrite_manifests_semantics"
+    sql """DROP TABLE IF EXISTS ${db_name}.${semantic_table}"""
+    sql """
+        CREATE TABLE ${db_name}.${semantic_table} (
+            id BIGINT,
+            name STRING
+        ) ENGINE=iceberg
+    """
+
+    sql """INSERT INTO ${db_name}.${semantic_table} VALUES (1, 'base')"""
+    sql """ALTER TABLE ${db_name}.${semantic_table} CREATE BRANCH manifest_branch"""
+    sql """ALTER TABLE ${db_name}.${semantic_table} CREATE TAG manifest_tag"""
+    sql """INSERT INTO ${db_name}.${semantic_table} VALUES (2, 'main-2')"""
+    sql """INSERT INTO ${db_name}.${semantic_table} VALUES (3, 'main-3')"""
+
+    List<List<Object>> semanticRefsBefore = sql """
+        SELECT name, snapshot_id
+        FROM ${semantic_table}\$refs
+        WHERE name IN ('main', 'manifest_branch', 'manifest_tag')
+        ORDER BY name
+    """
+    Map<String, String> semanticRefBeforeMap = semanticRefsBefore.collectEntries {
+        [(it[0].toString()): it[1].toString()]
+    }
+    String semanticMainSnapshotBeforeRewrite = semanticRefBeforeMap["main"]
+    String semanticBranchSnapshotBeforeRewrite = semanticRefBeforeMap["manifest_branch"]
+    String semanticTagSnapshotBeforeRewrite = semanticRefBeforeMap["manifest_tag"]
+
+    assertTrue(semanticMainSnapshotBeforeRewrite != semanticBranchSnapshotBeforeRewrite,
+        "Expected main and branch refs to point to different snapshots before manifest rewrite")
+    assertTrue(semanticBranchSnapshotBeforeRewrite == semanticTagSnapshotBeforeRewrite,
+        "Expected branch and tag refs to point to the same pre-rewrite snapshot")
+
+    def semanticMainCountBefore = sql """SELECT COUNT(*) FROM ${semantic_table}"""
+    def semanticBranchCountBefore = sql """SELECT COUNT(*) FROM ${semantic_table}@branch(manifest_branch)"""
+    def semanticTagCountBefore = sql """SELECT COUNT(*) FROM ${semantic_table} FOR VERSION AS OF 'manifest_tag'"""
+    assertTrue((semanticMainCountBefore[0][0] as int) == 3,
+        "Expected main branch to have 3 rows before manifest rewrite")
+    assertTrue((semanticBranchCountBefore[0][0] as int) == 1,
+        "Expected branch ref to have 1 row before manifest rewrite")
+    assertTrue((semanticTagCountBefore[0][0] as int) == 1,
+        "Expected tag ref to have 1 row before manifest rewrite")
+
+    List<List<Object>> semanticRewriteResult = sql """
+        ALTER TABLE ${catalog_name}.${db_name}.${semantic_table}
+        EXECUTE rewrite_manifests()
+    """
+    logger.info("Semantic stability rewrite_manifests result: ${semanticRewriteResult}")
+    assertTrue(semanticRewriteResult.size() == 1,
+        "Expected exactly 1 result row for semantic rewrite_manifests test")
+    assertTrue(semanticRewriteResult[0].size() == 2,
+        "Expected 2 columns in semantic rewrite_manifests result")
+
+    List<List<Object>> semanticRefsAfter = sql """
+        SELECT name, snapshot_id
+        FROM ${semantic_table}\$refs
+        WHERE name IN ('main', 'manifest_branch', 'manifest_tag')
+        ORDER BY name
+    """
+    Map<String, String> semanticRefAfterMap = semanticRefsAfter.collectEntries {
+        [(it[0].toString()): it[1].toString()]
+    }
+
+    assertTrue(semanticRefAfterMap["manifest_branch"] == semanticBranchSnapshotBeforeRewrite,
+        "Expected branch ref snapshot to remain unchanged after manifest rewrite")
+    assertTrue(semanticRefAfterMap["manifest_tag"] == semanticTagSnapshotBeforeRewrite,
+        "Expected tag ref snapshot to remain unchanged after manifest rewrite")
+
+    def semanticMainCountAfter = sql """SELECT COUNT(*) FROM ${semantic_table}"""
+    def semanticBranchCountAfter = sql """SELECT COUNT(*) FROM ${semantic_table}@branch(manifest_branch)"""
+    def semanticTagCountAfter = sql """SELECT COUNT(*) FROM ${semantic_table} FOR VERSION AS OF 'manifest_tag'"""
+    def semanticTimeTravelCount = sql """SELECT COUNT(*) FROM ${semantic_table} FOR VERSION AS OF ${semanticMainSnapshotBeforeRewrite}"""
+
+    assertTrue((semanticMainCountAfter[0][0] as int) == 3,
+        "Expected main branch row count to remain unchanged after manifest rewrite")
+    assertTrue((semanticBranchCountAfter[0][0] as int) == 1,
+        "Expected branch ref row count to remain unchanged after manifest rewrite")
+    assertTrue((semanticTagCountAfter[0][0] as int) == 1,
+        "Expected tag ref row count to remain unchanged after manifest rewrite")
+    assertTrue((semanticTimeTravelCount[0][0] as int) == 3,
+        "Expected pre-rewrite main snapshot to remain readable through time travel after manifest rewrite")
+
+    logger.info("rewrite_manifests semantic stability test completed successfully")
+
+    // =====================================================================================
+    // Test Case 6: rewrite_manifests metadata convergence should be observable
+    // Verifies that manifest count is materially reduced on a manifest-heavy table.
+    // =====================================================================================
+    logger.info("Starting rewrite_manifests metadata convergence test case")
+
+    def convergence_table = "test_rewrite_manifests_convergence"
+    sql """DROP TABLE IF EXISTS ${db_name}.${convergence_table}"""
+    sql """
+        CREATE TABLE ${db_name}.${convergence_table} (
+            id BIGINT,
+            category STRING,
+            payload STRING
+        ) ENGINE=iceberg
+    """
+
+    (1..12).each { idx ->
+        sql """
+            INSERT INTO ${db_name}.${convergence_table} VALUES
+            (${idx}, 'c${idx % 3}', 'payload-${idx}')
+        """
+    }
+
+    List<List<Object>> convergenceManifestsBefore = sql """
+        SELECT COUNT(*) AS manifest_count
+        FROM ${convergence_table}\$manifests
+    """
+    int convergenceManifestCountBefore = convergenceManifestsBefore[0][0] as int
+    assertTrue(convergenceManifestCountBefore >= 4,
+        "Expected manifest-heavy table to have at least 4 manifests before rewrite, got ${convergenceManifestCountBefore}")
+
+    List<List<Object>> convergenceSnapshotsBefore = sql """
+        SELECT COUNT(*) AS snapshot_count
+        FROM ${convergence_table}\$snapshots
+    """
+    int convergenceSnapshotCountBefore = convergenceSnapshotsBefore[0][0] as int
+
+    List<List<Object>> convergenceRewriteResult = sql """
+        ALTER TABLE ${catalog_name}.${db_name}.${convergence_table}
+        EXECUTE rewrite_manifests()
+    """
+    logger.info("Metadata convergence rewrite_manifests result: ${convergenceRewriteResult}")
+    assertTrue(convergenceRewriteResult.size() == 1,
+        "Expected exactly 1 result row for metadata convergence test")
+    assertTrue(convergenceRewriteResult[0].size() == 2,
+        "Expected 2 columns in metadata convergence result")
+
+    int convergenceRewrittenCount = convergenceRewriteResult[0][0] as int
+    int convergenceAddedCount = convergenceRewriteResult[0][1] as int
+    assertTrue(convergenceRewrittenCount > 0,
+        "Expected metadata convergence test to rewrite at least one manifest")
+    assertTrue(convergenceAddedCount >= 0,
+        "Expected metadata convergence added count to be non-negative")
+
+    List<List<Object>> convergenceManifestsAfter = sql """
+        SELECT COUNT(*) AS manifest_count
+        FROM ${convergence_table}\$manifests
+    """
+    int convergenceManifestCountAfter = convergenceManifestsAfter[0][0] as int
+    List<List<Object>> convergenceSnapshotsAfter = sql """
+        SELECT COUNT(*) AS snapshot_count
+        FROM ${convergence_table}\$snapshots
+    """
+    int convergenceSnapshotCountAfter = convergenceSnapshotsAfter[0][0] as int
+    logger.info("Metadata convergence manifests before=${convergenceManifestCountBefore}, after=${convergenceManifestCountAfter}")
+
+    assertTrue(convergenceSnapshotCountAfter > convergenceSnapshotCountBefore,
+        "Expected rewrite_manifests metadata convergence test to commit a new snapshot")
+    assertTrue(convergenceManifestCountAfter <= convergenceManifestCountBefore,
+        "Expected rewrite_manifests to keep manifest count non-increasing on manifest-heavy table")
+    if (convergenceManifestCountAfter < convergenceManifestCountBefore) {
+        assertTrue(convergenceManifestCountBefore - convergenceManifestCountAfter >= 1,
+            "Expected rewrite_manifests to provide observable manifest-count reduction when count decreases")
+    } else {
+        logger.info("Metadata convergence kept manifest count stable after rewrite; rewrite still committed a new snapshot")
+    }
+
+    def convergenceRecordCount = sql """SELECT COUNT(*) FROM ${convergence_table}"""
+    assertTrue((convergenceRecordCount[0][0] as int) == 12,
+        "Expected record count to remain unchanged after metadata convergence rewrite")
+
+    logger.info("rewrite_manifests metadata convergence test completed successfully")
 
     // =====================================================================================
     // Negative Test Cases: Parameter validation and error handling

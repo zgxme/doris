@@ -30,7 +30,7 @@ suite("test_iceberg_expire_snapshots", "p0,external,doris,external_docker,extern
     }
 
     String catalog_name = "test_iceberg_expire_snapshots"
-    String db_name = "test_db"
+    String db_name = "test_db_expire_snapshots"
     String rest_port = context.config.otherConfigs.get("iceberg_rest_uri_port")
     String minio_port = context.config.otherConfigs.get("iceberg_minio_port")
     String externalEnvIp = context.config.otherConfigs.get("externalEnvIp")
@@ -80,6 +80,20 @@ suite("test_iceberg_expire_snapshots", "p0,external,doris,external_docker,extern
         } finally {
             obj.objectContent.close()
         }
+    }
+
+    def toEpochMillis = { Object value ->
+        if (value instanceof Number) {
+            return ((Number) value).longValue()
+        }
+        if (value instanceof java.util.Date) {
+            return ((java.util.Date) value).getTime()
+        }
+        String text = String.valueOf(value).trim()
+        if (text.isLong()) {
+            return Long.parseLong(text)
+        }
+        return java.sql.Timestamp.valueOf(text.replace("T", " ")).getTime()
     }
 
     // =====================================================================================
@@ -220,6 +234,86 @@ suite("test_iceberg_expire_snapshots", "p0,external,doris,external_docker,extern
     long schemasAfter = ((List) metadataAfter.schemas).size()
     assertTrue(schemasAfter < schemasBefore,
         "Expected schemas cleaned up, before=${schemasBefore}, after=${schemasAfter}")
+
+    // =====================================================================================
+    // Test Case 5: expire_snapshots with snapshot_ids parameter
+    // =====================================================================================
+    String snapshot_ids_table = "test_expire_snapshots_by_id"
+    sql """DROP TABLE IF EXISTS ${db_name}.${snapshot_ids_table}"""
+    sql """
+        CREATE TABLE ${db_name}.${snapshot_ids_table} (
+            id BIGINT,
+            data STRING
+        ) ENGINE=iceberg
+    """
+    sql """INSERT INTO ${db_name}.${snapshot_ids_table} VALUES (1, 'data1')"""
+    sql """INSERT INTO ${db_name}.${snapshot_ids_table} VALUES (2, 'data2')"""
+    sql """INSERT INTO ${db_name}.${snapshot_ids_table} VALUES (3, 'data3')"""
+    sql """INSERT INTO ${db_name}.${snapshot_ids_table} VALUES (4, 'data4')"""
+
+    List<List<Object>> snapshotsBeforeByIdExpire = sql """
+        SELECT snapshot_id FROM ${snapshot_ids_table}\$snapshots ORDER BY committed_at
+    """
+    assertTrue(snapshotsBeforeByIdExpire.size() == 4,
+        "Expected 4 snapshots before snapshot_ids expiration")
+    String snapshotToExpire = snapshotsBeforeByIdExpire[0][0].toString()
+
+    List<List<Object>> expireByIdResult = sql """
+        ALTER TABLE ${catalog_name}.${db_name}.${snapshot_ids_table}
+        EXECUTE expire_snapshots("snapshot_ids" = "${snapshotToExpire}")
+    """
+    logger.info("Expire snapshot_ids result: ${expireByIdResult}")
+
+    List<List<Object>> snapshotsAfterByIdExpire = sql """
+        SELECT snapshot_id FROM ${snapshot_ids_table}\$snapshots ORDER BY committed_at
+    """
+    assertTrue(snapshotsAfterByIdExpire.size() == 3,
+        "Expected 3 snapshots after expiring one snapshot by snapshot_ids")
+    assertTrue(!snapshotsAfterByIdExpire.collect { String.valueOf(it[0]) }.contains(snapshotToExpire),
+        "Expected expired snapshot_id ${snapshotToExpire} to be removed from snapshots table")
+
+    // =====================================================================================
+    // Test Case 6: expire_snapshots with max_concurrent_deletes parameter
+    // =====================================================================================
+    String concurrent_delete_table = "test_expire_snapshots_concurrent_delete"
+    sql """DROP TABLE IF EXISTS ${db_name}.${concurrent_delete_table}"""
+    sql """
+        CREATE TABLE ${db_name}.${concurrent_delete_table} (
+            id BIGINT,
+            data STRING
+        ) ENGINE=iceberg
+    """
+    sql """INSERT INTO ${db_name}.${concurrent_delete_table} VALUES (1, 'data1')"""
+    sql """INSERT INTO ${db_name}.${concurrent_delete_table} VALUES (2, 'data2')"""
+    sql """INSERT INTO ${db_name}.${concurrent_delete_table} VALUES (3, 'data3')"""
+    sql """INSERT OVERWRITE TABLE ${db_name}.${concurrent_delete_table} VALUES (4, 'data4')"""
+
+    List<List<Object>> snapshotsBeforeConcurrentDeleteExpire = sql """
+        SELECT committed_at, snapshot_id FROM ${concurrent_delete_table}\$snapshots ORDER BY committed_at
+    """
+    assertTrue(snapshotsBeforeConcurrentDeleteExpire.size() >= 2,
+        "Expected multiple snapshots before concurrent delete expiration")
+    long expireMillisWithConcurrentDeletes = toEpochMillis(snapshotsBeforeConcurrentDeleteExpire.last()[0]) + 1
+    List<List<Object>> expireWithConcurrentDeletesResult = sql """
+        ALTER TABLE ${catalog_name}.${db_name}.${concurrent_delete_table}
+        EXECUTE expire_snapshots(
+            "older_than" = "${expireMillisWithConcurrentDeletes}",
+            "retain_last" = "1",
+            "max_concurrent_deletes" = "2"
+        )
+    """
+    logger.info("Expire snapshots with max_concurrent_deletes result: ${expireWithConcurrentDeletesResult}")
+    logger.info("Snapshots before concurrent delete expire: ${snapshotsBeforeConcurrentDeleteExpire}")
+    assertTrue(expireWithConcurrentDeletesResult.size() == 1,
+        "Expected one result row for expire_snapshots with max_concurrent_deletes")
+    assertTrue(expireWithConcurrentDeletesResult[0].size() == 6,
+        "Expected 6 result columns for expire_snapshots with max_concurrent_deletes")
+
+    List<List<Object>> snapshotsAfterConcurrentDeleteExpire = sql """
+        SELECT snapshot_id FROM ${concurrent_delete_table}\$snapshots ORDER BY committed_at
+    """
+    assertTrue(snapshotsAfterConcurrentDeleteExpire.size() == 1,
+        "Expected one snapshot remaining after concurrent delete expiration")
 
     // =====================================================================================
     // Negative Test Cases for expire_snapshots

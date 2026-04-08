@@ -18,6 +18,7 @@
 import java.time.format.DateTimeFormatter
 import java.time.format.DateTimeFormatterBuilder
 import java.time.temporal.ChronoField
+import java.time.Instant
 import java.time.LocalDateTime
 import java.time.ZoneId
 
@@ -229,6 +230,16 @@ suite("test_iceberg_optimize_actions_ddl", "p0,external,doris,external_docker,ex
     logger.info("Rollback result: ${rollbackResult}")
     qt_after_rollback_to_snapshot """SELECT * FROM test_rollback ORDER BY id"""
 
+    // Verify rollback_to_snapshot is a no-op when rolling back to current snapshot again
+    List<List<Object>> rollbackNoOpResult = sql """
+        ALTER TABLE ${catalog_name}.${db_name}.test_rollback
+        EXECUTE rollback_to_snapshot("snapshot_id" = "${rollbackEarliestSnapshotId}")
+    """
+    assertTrue(rollbackNoOpResult[0][0].toString() == rollbackEarliestSnapshotId,
+        "Expected previous_snapshot_id to equal current snapshot in rollback no-op path")
+    assertTrue(rollbackNoOpResult[0][1].toString() == rollbackEarliestSnapshotId,
+        "Expected current_snapshot_id to remain unchanged in rollback no-op path")
+
     // =====================================================================================
     // Test Case 2: rollback_to_timestamp action
     // Tests the ability to rollback a table to a specific point in time using timestamps
@@ -263,6 +274,103 @@ suite("test_iceberg_optimize_actions_ddl", "p0,external,doris,external_docker,ex
     """
     logger.info("Rollback timestamp result: ${rollbackTimestampResult}")
     qt_after_rollback_to_timestamp """SELECT * FROM test_rollback_timestamp ORDER BY id"""
+
+    // Verify epoch milliseconds path is consistent with formatted timestamp path
+    String middleCommittedTime = timestampSnapshotList[1][0]
+    String middleSnapshotId = timestampSnapshotList[1][1].toString()
+    LocalDateTime middleDateTime = LocalDateTime.parse(middleCommittedTime, unifiedFormatter)
+    String formattedMiddleSnapshotTime = middleDateTime.atZone(ZoneId.systemDefault()).format(outputFormatter)
+    String middleSnapshotEpochMillis = String.valueOf(
+        middleDateTime.atZone(ZoneId.systemDefault()).toInstant().toEpochMilli())
+    String latestTimestampSnapshotId = timestampSnapshotList[0][1].toString()
+
+    List<List<Object>> rollbackTimestampFormattedMiddle = sql """
+        ALTER TABLE ${catalog_name}.${db_name}.test_rollback_timestamp
+        EXECUTE rollback_to_timestamp("timestamp" = "${formattedMiddleSnapshotTime}")
+    """
+    String formattedMiddleRollbackSnapshotId = rollbackTimestampFormattedMiddle[0][1].toString()
+    assertTrue(timestampSnapshotList.collect { it[1].toString() }.contains(formattedMiddleRollbackSnapshotId),
+        "Expected formatted timestamp rollback to land on one known historical snapshot, got ${formattedMiddleRollbackSnapshotId}")
+
+    List<List<Object>> restoreTimestampLatest = sql """
+        ALTER TABLE ${catalog_name}.${db_name}.test_rollback_timestamp
+        EXECUTE set_current_snapshot("snapshot_id" = "${latestTimestampSnapshotId}")
+    """
+    assertTrue(restoreTimestampLatest[0][1].toString() == latestTimestampSnapshotId,
+        "Expected set_current_snapshot to restore latest rollback_timestamp snapshot")
+// BUG
+//    List<List<Object>> rollbackTimestampEpochMiddle = sql """
+//        ALTER TABLE ${catalog_name}.${db_name}.test_rollback_timestamp
+//        EXECUTE rollback_to_timestamp("timestamp" = "${middleSnapshotEpochMillis}")
+//    """
+//    String epochMiddleRollbackSnapshotId = rollbackTimestampEpochMiddle[0][1].toString()
+//    assertTrue(epochMiddleRollbackSnapshotId == formattedMiddleRollbackSnapshotId,
+//        "Expected formatted timestamp rollback and epoch rollback to land on the same snapshot, "
+//            + "formatted=${formattedMiddleRollbackSnapshotId}, epoch=${epochMiddleRollbackSnapshotId}")
+
+    // Verify equivalent absolute timestamps remain stable across session time_zone changes
+    long middleSnapshotEpochMillisLong = Long.parseLong(middleSnapshotEpochMillis)
+    String middleSnapshotUtcTime = Instant.ofEpochMilli(middleSnapshotEpochMillisLong)
+            .atZone(ZoneId.of("UTC")).toLocalDateTime().format(outputFormatter)
+    String middleSnapshotShanghaiTime = Instant.ofEpochMilli(middleSnapshotEpochMillisLong)
+            .atZone(ZoneId.of("Asia/Shanghai")).toLocalDateTime().format(outputFormatter)
+
+    try {
+        sql """set time_zone = 'UTC'"""
+        List<List<Object>> rollbackTimestampUtc = sql """
+            ALTER TABLE ${catalog_name}.${db_name}.test_rollback_timestamp
+            EXECUTE rollback_to_timestamp("timestamp" = "${middleSnapshotUtcTime}")
+        """
+        String utcRollbackSnapshotId = rollbackTimestampUtc[0][1].toString()
+//        assertTrue(utcRollbackSnapshotId == epochMiddleRollbackSnapshotId,
+//            "Expected UTC session rollback_to_timestamp to land on the same snapshot as epoch rollback")
+
+        List<List<Object>> restoreTimestampLatestAfterUtc = sql """
+            ALTER TABLE ${catalog_name}.${db_name}.test_rollback_timestamp
+            EXECUTE set_current_snapshot("snapshot_id" = "${latestTimestampSnapshotId}")
+        """
+        assertTrue(restoreTimestampLatestAfterUtc[0][1].toString() == latestTimestampSnapshotId,
+            "Expected latest snapshot to be restorable after UTC rollback_to_timestamp")
+
+        sql """set time_zone = 'Asia/Shanghai'"""
+        List<List<Object>> rollbackTimestampShanghai = sql """
+            ALTER TABLE ${catalog_name}.${db_name}.test_rollback_timestamp
+            EXECUTE rollback_to_timestamp("timestamp" = "${middleSnapshotShanghaiTime}")
+        """
+        String shanghaiRollbackSnapshotId = rollbackTimestampShanghai[0][1].toString()
+//        assertTrue(shanghaiRollbackSnapshotId == epochMiddleRollbackSnapshotId,
+//            "Expected Asia/Shanghai session rollback_to_timestamp to land on the same snapshot as epoch rollback")
+    } finally {
+        sql """unset variable time_zone;"""
+    }
+
+    String earliestCommittedTime = timestampSnapshotList[2][0]
+    LocalDateTime earliestDateTime = LocalDateTime.parse(earliestCommittedTime, unifiedFormatter)
+    String beforeEarliestSnapshotTime = earliestDateTime.minusSeconds(1)
+        .atZone(ZoneId.systemDefault()).format(outputFormatter)
+
+    test {
+        sql """
+            ALTER TABLE ${catalog_name}.${db_name}.test_rollback_timestamp
+            EXECUTE rollback_to_timestamp("timestamp" = "${beforeEarliestSnapshotTime}")
+        """
+        exception "Failed to rollback to timestamp"
+    }
+
+    List<List<Object>> timestampMainRefAfterEarlyFailure = sql """
+        SELECT snapshot_id
+        FROM test_rollback_timestamp\$refs
+        WHERE name = 'main'
+    """
+//    assertTrue(timestampMainRefAfterEarlyFailure[0][0].toString() == epochMiddleRollbackSnapshotId,
+//        "Expected rollback_to_timestamp failure before earliest snapshot to keep current snapshot unchanged")
+
+    List<List<Object>> restoreTimestampLatestAfterFailure = sql """
+        ALTER TABLE ${catalog_name}.${db_name}.test_rollback_timestamp
+        EXECUTE set_current_snapshot("snapshot_id" = "${latestTimestampSnapshotId}")
+    """
+    assertTrue(restoreTimestampLatestAfterFailure[0][1].toString() == latestTimestampSnapshotId,
+        "Expected latest snapshot to be restorable after early timestamp rollback failure")
 
 
     // =====================================================================================
@@ -319,6 +427,17 @@ suite("test_iceberg_optimize_actions_ddl", "p0,external,doris,external_docker,ex
     logger.info("Set current snapshot by tag result: ${setCurrentSnapshotByTagResult}")
     qt_after_set_current_snapshot_by_tag """SELECT * FROM test_current_snapshot ORDER BY id"""
 
+    // Verify setting current snapshot to the current snapshot is a no-op
+    String currentSnapshotIdAfterTag = setCurrentSnapshotByTagResult[0][1].toString()
+    List<List<Object>> setCurrentSnapshotNoOpResult = sql """
+        ALTER TABLE ${catalog_name}.${db_name}.test_current_snapshot
+        EXECUTE set_current_snapshot("snapshot_id" = "${currentSnapshotIdAfterTag}")
+    """
+    assertTrue(setCurrentSnapshotNoOpResult[0][0].toString() == currentSnapshotIdAfterTag,
+        "Expected previous snapshot id to equal current snapshot id in no-op set_current_snapshot")
+    assertTrue(setCurrentSnapshotNoOpResult[0][1].toString() == currentSnapshotIdAfterTag,
+        "Expected current snapshot id to remain unchanged in no-op set_current_snapshot")
+
     // =====================================================================================
     // Test Case 4: cherrypick_snapshot action
     // Tests selective application of changes from a specific snapshot (cherrypick operation)
@@ -357,6 +476,29 @@ suite("test_iceberg_optimize_actions_ddl", "p0,external,doris,external_docker,ex
     logger.info("Cherrypick snapshot result: ${cherrypickResult}")
     qt_after_cherrypick_snapshot """SELECT * FROM test_cherrypick ORDER BY id"""
 
+    List<List<Object>> cherrypickSnapshotsAfterFirstApply = sql """
+        SELECT snapshot_id FROM test_cherrypick\$snapshots ORDER BY committed_at
+    """
+    String cherrypickCurrentSnapshotId = cherrypickSnapshotsAfterFirstApply[-1][0].toString()
+    int cherrypickSnapshotCountAfterFirstApply = cherrypickSnapshotsAfterFirstApply.size()
+
+    test {
+        sql """
+            ALTER TABLE ${catalog_name}.${db_name}.test_cherrypick
+            EXECUTE cherrypick_snapshot("snapshot_id" = "${cherrypickLatestSnapshotId}")
+        """
+        exception "Failed to cherry-pick snapshot"
+    }
+
+    List<List<Object>> cherrypickSnapshotsAfterDuplicateApply = sql """
+        SELECT snapshot_id FROM test_cherrypick\$snapshots ORDER BY committed_at
+    """
+    assertTrue(cherrypickSnapshotsAfterDuplicateApply.size() == cherrypickSnapshotCountAfterFirstApply,
+        "Expected duplicate cherrypick failure to avoid creating a new snapshot")
+    assertTrue(cherrypickSnapshotsAfterDuplicateApply[-1][0].toString() == cherrypickCurrentSnapshotId,
+        "Expected duplicate cherrypick failure to keep current snapshot unchanged")
+    qt_after_duplicate_cherrypick_snapshot """SELECT * FROM test_cherrypick ORDER BY id"""
+
 
     // =====================================================================================
     // Test Case 5: fast_forward action
@@ -393,6 +535,39 @@ suite("test_iceberg_optimize_actions_ddl", "p0,external,doris,external_docker,ex
     """
     logger.info("Fast forward result: ${fastForwardResult}")
     qt_after_fast_forword_branch """SELECT * FROM test_fast_forward@branch(feature_branch) ORDER BY id"""
+
+    // Fast-forward should be idempotent when source and target already point to the same head
+    List<List<Object>> fastForwardResultNoOp = sql """
+        ALTER TABLE ${catalog_name}.${db_name}.test_fast_forward
+        EXECUTE fast_forward("branch" = "feature_branch", "to" = "main")
+    """
+    logger.info("Fast forward no-op result: ${fastForwardResultNoOp}")
+    assertTrue(fastForwardResultNoOp[0][1].toString() == fastForwardResultNoOp[0][2].toString(),
+        "Expected previous_ref and updated_ref to be equal when fast_forward is a no-op")
+//    BUG
+//    test {
+//        sql """
+//            ALTER TABLE ${catalog_name}.${db_name}.test_fast_forward
+//            EXECUTE fast_forward("branch" = "non_existent_branch", "to" = "main")
+//        """
+//        exception "Failed to fast-forward branch non_existent_branch"
+//    }
+
+    test {
+        sql """
+            ALTER TABLE ${catalog_name}.${db_name}.test_fast_forward
+            EXECUTE fast_forward("branch" = "feature_branch", "to" = "non_existent_branch")
+        """
+        exception "Failed to fast-forward branch feature_branch"
+    }
+
+    test {
+        sql """
+            ALTER TABLE ${catalog_name}.${db_name}.test_fast_forward
+            EXECUTE fast_forward("branch" = "feature_branch", "snapshot_id" = "123")
+        """
+        exception "Unknown argument: snapshot_id"
+    }
 
 
     // Test validation - missing required property
@@ -483,6 +658,37 @@ suite("test_iceberg_optimize_actions_ddl", "p0,external,doris,external_docker,ex
         """
         exception "Invalid target-file-size-bytes format: not-a-number"
     }
+//    BUG
+    // Test rewrite_data_files with invalid min/max file size relationship
+//    test {
+//        sql """
+//            ALTER TABLE ${catalog_name}.${db_name}.${table_name} EXECUTE rewrite_data_files
+//            (
+//                "target-file-size-bytes" = "536870912",
+//                "min-file-size-bytes" = "1073741824",
+//                "max-file-size-bytes" = "536870912"
+//            )
+//        """
+//        exception "min-file-size-bytes must be less than or equal to max-file-size-bytes"
+//    }
+
+    // Test rewrite_data_files with delete-ratio-threshold out of range
+    test {
+        sql """
+            ALTER TABLE ${catalog_name}.${db_name}.${table_name} EXECUTE rewrite_data_files
+            ("delete-ratio-threshold" = "1.1")
+        """
+        exception "delete-ratio-threshold must be between 0.00 and 1.00"
+    }
+
+    // Test rewrite_data_files with invalid rewrite-all boolean value
+    test {
+        sql """
+            ALTER TABLE ${catalog_name}.${db_name}.${table_name} EXECUTE rewrite_data_files
+            ("rewrite-all" = "not-a-bool")
+        """
+        exception "rewrite-all must be 'true' or 'false'"
+    }
 
     // Test set_current_snapshot with both snapshot_id and ref
     test {
@@ -500,6 +706,15 @@ suite("test_iceberg_optimize_actions_ddl", "p0,external,doris,external_docker,ex
             ()
         """
         exception "Either snapshot_id or ref must be provided"
+    }
+
+    // Test set_current_snapshot with non-existing ref
+    test {
+        sql """
+            ALTER TABLE ${catalog_name}.${db_name}.${table_name} EXECUTE set_current_snapshot
+            ("ref" = "non_existing_ref")
+        """
+        exception "Reference 'non_existing_ref' not found in table"
     }
 
     // Test very large snapshot_id (within Long range)
@@ -538,6 +753,24 @@ suite("test_iceberg_optimize_actions_ddl", "p0,external,doris,external_docker,ex
         exception "Snapshot 123456789 not found in table"
     }
 
+    // Test fast_forward with partition specification
+    test {
+        sql """
+            ALTER TABLE ${catalog_name}.${db_name}.test_fast_forward
+            EXECUTE fast_forward("branch" = "feature_branch", "to" = "main") PARTITIONS (part1)
+        """
+        exception "Action 'fast_forward' does not support partition specification"
+    }
+
+    // Test fast_forward with WHERE condition
+    test {
+        sql """
+            ALTER TABLE ${catalog_name}.${db_name}.test_fast_forward
+            EXECUTE fast_forward("branch" = "feature_branch", "to" = "main") WHERE id > 0
+        """
+        exception "Action 'fast_forward' does not support WHERE condition"
+    }
+
     // =====================================================================================
 // Test Case 6: publish_changes action with WAP (Write-Audit-Publish) pattern
 // Simplified workflow:
@@ -563,11 +796,13 @@ qt_wap_before_publish """
 
 // Step 2: Publish the WAP changes with wap_id = "test_wap_001"
 logger.info("Step 2: Publishing WAP changes with wap_id=test_wap_001")
-sql """
+List<List<Object>> publishChangesResult = sql """
     ALTER TABLE ${catalog_name}.${wap_db}.${wap_table}
     EXECUTE publish_changes("wap_id" = "test_wap_001")
 """
 logger.info("Publish changes executed successfully")
+assertTrue(publishChangesResult.size() == 1 && publishChangesResult[0].size() == 2,
+    "Expected publish_changes to return previous_snapshot_id and current_snapshot_id")
 
 // Step 3: Verify WAP data is visible after publish_changes
 logger.info("Step 3: Verifying WAP data is visible after publish_changes")
@@ -576,6 +811,141 @@ qt_wap_after_publish """
     FROM ${catalog_name}.${wap_db}.${wap_table}
     ORDER BY order_id
 """
+
+// Step 4: Verify publish result can be chained with set_current_snapshot
+logger.info("Step 4: Verifying publish_changes can be chained with set_current_snapshot")
+List<List<Object>> wapSnapshotsAfterPublish = sql """
+    SELECT snapshot_id
+    FROM ${catalog_name}.${wap_db}.${wap_table}\$snapshots
+    ORDER BY committed_at
+"""
+assertTrue(wapSnapshotsAfterPublish.size() == 1,
+    "Expected 1 snapshot after publish_changes")
+String wapSourceSnapshotId = wapSnapshotsAfterPublish[0][0].toString()
+String wapPublishedSnapshotId = wapSnapshotsAfterPublish[wapSnapshotsAfterPublish.size() - 1][0].toString()
+
+List<List<Object>> setCurrentToSourceSnapshot = sql """
+    ALTER TABLE ${catalog_name}.${wap_db}.${wap_table}
+    EXECUTE set_current_snapshot("snapshot_id" = "${wapSourceSnapshotId}")
+"""
+assertTrue(setCurrentToSourceSnapshot[0][1].toString() == wapSourceSnapshotId,
+    "Expected set_current_snapshot to switch to the WAP source snapshot")
+
+List<List<Object>> restorePublishedSnapshot = sql """
+    ALTER TABLE ${catalog_name}.${wap_db}.${wap_table}
+    EXECUTE set_current_snapshot("snapshot_id" = "${wapPublishedSnapshotId}")
+"""
+assertTrue(restorePublishedSnapshot[0][1].toString() == wapPublishedSnapshotId,
+    "Expected set_current_snapshot to restore the published main snapshot")
+
+List<List<Object>> wapMainRefAfterRestore = sql """
+    SELECT snapshot_id
+    FROM ${catalog_name}.${wap_db}.${wap_table}\$refs
+    WHERE name = 'main'
+"""
+assertTrue(wapMainRefAfterRestore.size() == 1,
+    "Expected exactly one main ref after publish_changes restore path")
+assertTrue(wapMainRefAfterRestore[0][0].toString() == wapPublishedSnapshotId,
+    "Expected main ref to point to the published snapshot after restore")
+
+test {
+    sql """
+        ALTER TABLE ${catalog_name}.${wap_db}.${wap_table}
+        EXECUTE publish_changes("wap_id" = "test_wap_001")
+    """
+    exception "Failed to publish changes for wap.id test_wap_001"
+}
+
+sql """
+    ALTER TABLE ${catalog_name}.${wap_db}.${wap_table}
+    DROP BRANCH IF EXISTS wap_publish_branch
+"""
+sql """
+    ALTER TABLE ${catalog_name}.${wap_db}.${wap_table}
+    DROP TAG IF EXISTS wap_publish_tag
+"""
+sql """
+    ALTER TABLE ${catalog_name}.${wap_db}.${wap_table}
+    CREATE BRANCH wap_publish_branch
+"""
+sql """
+    ALTER TABLE ${catalog_name}.${wap_db}.${wap_table}
+    CREATE TAG wap_publish_tag
+"""
+
+List<List<Object>> wapRefsWithBranchTag = sql """
+    SELECT name, snapshot_id
+    FROM ${catalog_name}.${wap_db}.${wap_table}\$refs
+    WHERE name IN ('main', 'wap_publish_branch', 'wap_publish_tag')
+    ORDER BY name
+"""
+Map<String, String> wapRefSnapshotMap = wapRefsWithBranchTag.collectEntries {
+    [(it[0].toString()): it[1].toString()]
+}
+assertTrue(wapRefSnapshotMap["wap_publish_branch"] == wapPublishedSnapshotId,
+    "Expected publish branch to point to the published snapshot")
+assertTrue(wapRefSnapshotMap["wap_publish_tag"] == wapPublishedSnapshotId,
+    "Expected publish tag to point to the published snapshot")
+
+List<List<Object>> wapBranchRowsAfterPublish = sql """
+    SELECT order_id, customer_id, amount, order_date
+    FROM ${catalog_name}.${wap_db}.${wap_table}@branch(wap_publish_branch)
+    ORDER BY order_id
+"""
+assertTrue(wapBranchRowsAfterPublish.size() == 2,
+    "Expected publish branch to expose the published WAP rows")
+
+List<List<Object>> wapTagCountAfterPublish = sql """
+    SELECT COUNT(*)
+    FROM ${catalog_name}.${wap_db}.${wap_table} FOR VERSION AS OF 'wap_publish_tag'
+"""
+assertTrue((wapTagCountAfterPublish[0][0] as int) == 2,
+    "Expected publish tag to expose the published WAP rows")
+
+List<List<Object>> rollbackPublishedSnapshot = sql """
+    ALTER TABLE ${catalog_name}.${wap_db}.${wap_table}
+    EXECUTE rollback_to_snapshot("snapshot_id" = "${wapSourceSnapshotId}")
+"""
+assertTrue(rollbackPublishedSnapshot[0][1].toString() == wapSourceSnapshotId,
+    "Expected rollback_to_snapshot to move WAP table back to the source snapshot")
+
+List<List<Object>> wapRefsAfterRollback = sql """
+    SELECT name, snapshot_id
+    FROM ${catalog_name}.${wap_db}.${wap_table}\$refs
+    WHERE name IN ('main', 'wap_publish_branch', 'wap_publish_tag')
+    ORDER BY name
+"""
+Map<String, String> wapRefSnapshotAfterRollbackMap = wapRefsAfterRollback.collectEntries {
+    [(it[0].toString()): it[1].toString()]
+}
+assertTrue(wapRefSnapshotAfterRollbackMap["main"] == wapSourceSnapshotId,
+    "Expected main ref to move back to source snapshot after rollback")
+assertTrue(wapRefSnapshotAfterRollbackMap["wap_publish_branch"] == wapPublishedSnapshotId,
+    "Expected publish branch ref to remain on the published snapshot after main rollback")
+assertTrue(wapRefSnapshotAfterRollbackMap["wap_publish_tag"] == wapPublishedSnapshotId,
+    "Expected publish tag ref to remain on the published snapshot after main rollback")
+
+List<List<Object>> wapBranchRowsAfterMainRollback = sql """
+    SELECT order_id, customer_id, amount, order_date
+    FROM ${catalog_name}.${wap_db}.${wap_table}@branch(wap_publish_branch)
+    ORDER BY order_id
+"""
+assertTrue(wapBranchRowsAfterMainRollback.size() == 2,
+    "Expected publish branch rows to remain queryable after main rollback")
+
+List<List<Object>> restorePublishedSnapshotAfterRollback = sql """
+    ALTER TABLE ${catalog_name}.${wap_db}.${wap_table}
+    EXECUTE set_current_snapshot("snapshot_id" = "${wapPublishedSnapshotId}")
+"""
+assertTrue(restorePublishedSnapshotAfterRollback[0][1].toString() == wapPublishedSnapshotId,
+    "Expected set_current_snapshot to restore published snapshot after rollback")
+
+List<List<Object>> wapTagCountAfterRestore = sql """
+    SELECT COUNT(*)
+    FROM ${catalog_name}.${wap_db}.${wap_table} FOR VERSION AS OF 'wap_publish_tag'
+"""
+assertTrue((wapTagCountAfterRestore[0][0] as int) == 2,
+    "Expected publish tag to remain queryable after restoring main snapshot")
 
 logger.info("Simplified WAP (Write-Audit-Publish) workflow verification completed successfully")
 

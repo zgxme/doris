@@ -43,7 +43,7 @@ suite("test_iceberg_rewrite_data_files", "p0,external,doris,external_docker,exte
     }
 
     String catalog_name = "test_iceberg_rewrite_data_files"
-    String db_name = "test_db"
+    String db_name = "test_db_rewrite_data_files"
     String rest_port = context.config.otherConfigs.get("iceberg_rest_uri_port")
     String minio_port = context.config.otherConfigs.get("iceberg_minio_port")
     String externalEnvIp = context.config.otherConfigs.get("externalEnvIp")
@@ -492,5 +492,196 @@ suite("test_iceberg_rewrite_data_files", "p0,external,doris,external_docker,exte
     assertTrue(northRecords[0][0] == 3, "NORTH region should still have 3 records")
     
     logger.info("Specific partition rewrite test completed successfully")
+
+    // =====================================================================================
+    // Test Case 4: rewrite_data_files with default target-file-size-bytes
+    // Tests the default parameter path because docs and code differ on whether
+    // target-file-size-bytes is required.
+    // =====================================================================================
+    logger.info("Starting rewrite_data_files default parameter path test case")
+
+    def table_name_default_target = "test_rewrite_default_target_file_size"
+    sql """DROP TABLE IF EXISTS ${db_name}.${table_name_default_target}"""
+    sql """
+        CREATE TABLE ${db_name}.${table_name_default_target} (
+            id BIGINT,
+            category STRING,
+            payload STRING
+        ) ENGINE=iceberg
+    """
+
+    sql """INSERT INTO ${db_name}.${table_name_default_target} VALUES (1, 'A', 'payload-1')"""
+    sql """INSERT INTO ${db_name}.${table_name_default_target} VALUES (2, 'A', 'payload-2')"""
+    sql """INSERT INTO ${db_name}.${table_name_default_target} VALUES (3, 'B', 'payload-3')"""
+    sql """INSERT INTO ${db_name}.${table_name_default_target} VALUES (4, 'B', 'payload-4')"""
+
+    List<List<Object>> defaultTargetSnapshotsBefore = sql """
+        SELECT snapshot_id FROM ${table_name_default_target}\$snapshots ORDER BY committed_at
+    """
+    assertTrue(defaultTargetSnapshotsBefore.size() == 4,
+        "Expected 4 snapshots before default target rewrite")
+
+    List<List<Object>> defaultTargetRewriteResult = sql """
+        ALTER TABLE ${catalog_name}.${db_name}.${table_name_default_target}
+        EXECUTE rewrite_data_files(
+            "min-input-files" = "2"
+        )
+    """
+    logger.info("Rewrite default target result: ${defaultTargetRewriteResult}")
+    assertTrue(defaultTargetRewriteResult.size() == 1,
+        "Expected one result row for default target rewrite")
+    assertTrue(defaultTargetRewriteResult[0].size() == 4,
+        "Expected 4 result columns for default target rewrite")
+
+    int defaultTargetRewrittenFiles = defaultTargetRewriteResult[0][0] as int
+    int defaultTargetAddedFiles = defaultTargetRewriteResult[0][1] as int
+    assertTrue(defaultTargetRewrittenFiles > 0,
+        "Expected files to be rewritten when using default target-file-size-bytes")
+    assertTrue(defaultTargetAddedFiles > 0,
+        "Expected new files to be added when using default target-file-size-bytes")
+
+    List<List<Object>> defaultTargetSnapshotsAfter = sql """
+        SELECT snapshot_id FROM ${table_name_default_target}\$snapshots ORDER BY committed_at
+    """
+    assertTrue(defaultTargetSnapshotsAfter.size() > defaultTargetSnapshotsBefore.size(),
+        "Expected a new snapshot after default target rewrite")
+
+    def defaultTargetRecordCount = sql """SELECT COUNT(*) FROM ${table_name_default_target}"""
+    assertTrue(defaultTargetRecordCount[0][0] == 4,
+        "Expected record count to remain unchanged after default target rewrite")
+
+    logger.info("rewrite_data_files default parameter path test completed successfully")
+
+    // =====================================================================================
+    // Test Case 5: rewrite_data_files with explicit output-spec-id on evolved spec
+    // =====================================================================================
+    logger.info("Starting rewrite_data_files output-spec-id test case")
+
+    def table_name_output_spec = "test_rewrite_output_spec_id"
+    sql """DROP TABLE IF EXISTS ${db_name}.${table_name_output_spec}"""
+    sql """
+        CREATE TABLE ${db_name}.${table_name_output_spec} (
+            id BIGINT,
+            year INT,
+            month INT,
+            payload STRING
+        ) ENGINE=iceberg
+        PARTITION BY (year)()
+    """
+
+    sql """INSERT INTO ${db_name}.${table_name_output_spec} VALUES (1, 2024, 1, 'p1')"""
+    sql """INSERT INTO ${db_name}.${table_name_output_spec} VALUES (2, 2024, 1, 'p2')"""
+    sql """ALTER TABLE ${catalog_name}.${db_name}.${table_name_output_spec} ADD PARTITION KEY month"""
+    sql """INSERT INTO ${db_name}.${table_name_output_spec} VALUES (3, 2024, 2, 'p3')"""
+    sql """INSERT INTO ${db_name}.${table_name_output_spec} VALUES (4, 2024, 2, 'p4')"""
+
+    List<List<Object>> outputSpecIds = sql """
+        SELECT partition_spec_id, COUNT(*) AS manifest_count
+        FROM ${table_name_output_spec}\$manifests
+        GROUP BY partition_spec_id
+        ORDER BY partition_spec_id
+    """
+    logger.info("Available output spec ids for rewrite_data_files: ${outputSpecIds}")
+    int explicitOutputSpecId = (outputSpecIds[-1][0] as int)
+    assertTrue(explicitOutputSpecId > 0,
+        "Expected evolved table to have a positive partition spec id")
+
+    List<List<Object>> outputSpecRewriteResult = sql """
+        ALTER TABLE ${catalog_name}.${db_name}.${table_name_output_spec}
+        EXECUTE rewrite_data_files(
+            "target-file-size-bytes" = "10485760",
+            "min-input-files" = "1",
+            "rewrite-all" = "true",
+            "output-spec-id" = "${explicitOutputSpecId}"
+        )
+    """
+    logger.info("Rewrite output-spec-id result: ${outputSpecRewriteResult}")
+    assertTrue(outputSpecRewriteResult.size() == 1,
+        "Expected one result row for output-spec-id rewrite")
+    assertTrue(outputSpecRewriteResult[0].size() == 4,
+        "Expected 4 result columns for output-spec-id rewrite")
+    assertTrue((outputSpecRewriteResult[0][0] as int) > 0,
+        "Expected output-spec-id rewrite to rewrite at least one file")
+
+    def outputSpecRecordCount = sql """SELECT COUNT(*) FROM ${table_name_output_spec}"""
+    assertTrue(outputSpecRecordCount[0][0] == 4,
+        "Expected record count to remain unchanged after output-spec-id rewrite")
+
+    logger.info("rewrite_data_files output-spec-id test completed successfully")
+
+    // =====================================================================================
+    // Test Case 6: rewrite_data_files default output-spec-id compatibility on evolved spec
+    // Verifies that omitting output-spec-id does not invent an unexpected spec_id such as 2
+    // when the table only contains earlier spec ids.
+    // =====================================================================================
+    logger.info("Starting rewrite_data_files default output-spec-id compatibility test case")
+
+    def table_name_default_output_spec = "test_rewrite_default_output_spec_id_compat"
+    sql """DROP TABLE IF EXISTS ${db_name}.${table_name_default_output_spec}"""
+    sql """
+        CREATE TABLE ${db_name}.${table_name_default_output_spec} (
+            id BIGINT,
+            year INT,
+            month INT,
+            payload STRING
+        ) ENGINE=iceberg
+        PARTITION BY (year)()
+    """
+
+    sql """INSERT INTO ${db_name}.${table_name_default_output_spec} VALUES (1, 2024, 1, 'd1')"""
+    sql """INSERT INTO ${db_name}.${table_name_default_output_spec} VALUES (2, 2024, 1, 'd2')"""
+    sql """ALTER TABLE ${catalog_name}.${db_name}.${table_name_default_output_spec} ADD PARTITION KEY month"""
+    sql """INSERT INTO ${db_name}.${table_name_default_output_spec} VALUES (3, 2024, 2, 'd3')"""
+    sql """INSERT INTO ${db_name}.${table_name_default_output_spec} VALUES (4, 2024, 2, 'd4')"""
+
+    List<List<Object>> defaultOutputSpecIdsBefore = sql """
+        SELECT partition_spec_id, COUNT(*) AS manifest_count
+        FROM ${table_name_default_output_spec}\$manifests
+        GROUP BY partition_spec_id
+        ORDER BY partition_spec_id
+    """
+    logger.info("Default output-spec-id compatibility - manifests before rewrite: ${defaultOutputSpecIdsBefore}")
+
+    List<Integer> knownSpecIdsBefore = defaultOutputSpecIdsBefore.collect { it[0] as int }
+    assertTrue(!knownSpecIdsBefore.isEmpty(),
+        "Expected evolved table to contain at least one manifest spec id before rewrite")
+    assertTrue(!knownSpecIdsBefore.contains(2),
+        "Test precondition failed: spec_id 2 should be absent before default output-spec-id rewrite")
+
+    List<List<Object>> defaultOutputSpecRewriteResult = sql """
+        ALTER TABLE ${catalog_name}.${db_name}.${table_name_default_output_spec}
+        EXECUTE rewrite_data_files(
+            "target-file-size-bytes" = "10485760",
+            "min-input-files" = "1",
+            "rewrite-all" = "true"
+        )
+    """
+    logger.info("Rewrite default output-spec-id compatibility result: ${defaultOutputSpecRewriteResult}")
+    assertTrue(defaultOutputSpecRewriteResult.size() == 1,
+        "Expected one result row for default output-spec-id compatibility rewrite")
+    assertTrue(defaultOutputSpecRewriteResult[0].size() == 4,
+        "Expected 4 result columns for default output-spec-id compatibility rewrite")
+    assertTrue((defaultOutputSpecRewriteResult[0][0] as int) > 0,
+        "Expected default output-spec-id compatibility rewrite to rewrite at least one file")
+
+    List<List<Object>> defaultOutputSpecIdsAfter = sql """
+        SELECT partition_spec_id, COUNT(*) AS manifest_count
+        FROM ${table_name_default_output_spec}\$manifests
+        GROUP BY partition_spec_id
+        ORDER BY partition_spec_id
+    """
+    logger.info("Default output-spec-id compatibility - manifests after rewrite: ${defaultOutputSpecIdsAfter}")
+
+    List<Integer> knownSpecIdsAfter = defaultOutputSpecIdsAfter.collect { it[0] as int }
+    assertTrue(!knownSpecIdsAfter.contains(2),
+        "Expected omitted output-spec-id path to avoid introducing unexpected spec_id 2")
+    assertTrue(knownSpecIdsAfter.every { knownSpecIdsBefore.contains(it) },
+        "Expected omitted output-spec-id path to keep manifest spec ids within the pre-existing set")
+
+    def defaultOutputSpecRecordCount = sql """SELECT COUNT(*) FROM ${table_name_default_output_spec}"""
+    assertTrue(defaultOutputSpecRecordCount[0][0] == 4,
+        "Expected record count to remain unchanged after default output-spec-id compatibility rewrite")
+
+    logger.info("rewrite_data_files default output-spec-id compatibility test completed successfully")
 
 }
